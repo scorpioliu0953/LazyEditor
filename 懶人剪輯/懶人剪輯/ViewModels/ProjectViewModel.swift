@@ -16,6 +16,10 @@ final class ProjectViewModel {
     var selectedFilter: VideoFilterPreset = .none
     var filterIntensity: Float = 1.0 // 0.0 ~ 1.0
 
+    // MARK: - 字卡
+    var textCardTrack = TextCardTrack()
+    var selectedTextCardID: UUID?
+
     // MARK: - 字幕
     var primarySubtitleTrack: SubtitleTrack = {
         let track = SubtitleTrack()
@@ -327,6 +331,7 @@ final class ProjectViewModel {
         let filterIntensityVal = filterIntensity
         let primarySnap = SubtitleRenderer.snapshot(from: primarySubtitleTrack)
         let secondarySnap = SubtitleRenderer.snapshot(from: secondarySubtitleTrack)
+        let textCardSnap = TextCardRenderer.snapshot(from: textCardTrack)
 
         Task {
             do {
@@ -387,7 +392,8 @@ final class ProjectViewModel {
                         filter: filterPreset,
                         intensity: filterIntensityVal,
                         primaryTrack: primarySnap,
-                        secondaryTrack: secondarySnap
+                        secondaryTrack: secondarySnap,
+                        textCardTrack: textCardSnap
                     ) {
                         try await VideoExporter.exportWithFilter(
                             composition: composition,
@@ -415,7 +421,8 @@ final class ProjectViewModel {
                         filter: filterPreset,
                         intensity: filterIntensityVal,
                         primaryTrack: primarySnap,
-                        secondaryTrack: secondarySnap
+                        secondaryTrack: secondarySnap,
+                        textCardTrack: textCardSnap
                     ) {
                         try await VideoExporter.exportWithFilter(
                             composition: composition,
@@ -525,6 +532,45 @@ final class ProjectViewModel {
             track.entries[idx].text = text
             track.entries[idx].startTime = startTime
             track.entries[idx].endTime = endTime
+        }
+    }
+
+    // MARK: - 字卡操作
+
+    func updateTextCardPosition(id: UUID, x: CGFloat, y: CGFloat) {
+        if let idx = textCardTrack.entries.firstIndex(where: { $0.id == id }) {
+            textCardTrack.entries[idx].positionX = x
+            textCardTrack.entries[idx].positionY = y
+            markDirty()
+        }
+    }
+
+    func updateTextCardScale(id: UUID, scale: CGFloat) {
+        if let idx = textCardTrack.entries.firstIndex(where: { $0.id == id }) {
+            textCardTrack.entries[idx].scale = scale
+            markDirty()
+        }
+    }
+
+    func updateTextCardText(id: UUID, text: String) {
+        if let idx = textCardTrack.entries.firstIndex(where: { $0.id == id }) {
+            textCardTrack.entries[idx].text = text
+            markDirty()
+        }
+    }
+
+    func updateTextCardStyle(id: UUID, style: TextCardStyle) {
+        if let idx = textCardTrack.entries.firstIndex(where: { $0.id == id }) {
+            textCardTrack.entries[idx].style = style
+            markDirty()
+        }
+    }
+
+    func updateTextCardTime(id: UUID, startTime: Double, endTime: Double) {
+        if let idx = textCardTrack.entries.firstIndex(where: { $0.id == id }) {
+            textCardTrack.entries[idx].startTime = startTime
+            textCardTrack.entries[idx].endTime = endTime
+            markDirty()
         }
     }
 

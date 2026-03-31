@@ -11,6 +11,9 @@ struct TimelineView: View {
         if !vm.secondarySubtitleTrack.entries.isEmpty {
             h += Constants.subtitleTrackHeight
         }
+        if !vm.textCardTrack.entries.isEmpty {
+            h += Constants.textCardTrackHeight
+        }
         return h
     }
 
@@ -69,6 +72,14 @@ struct TimelineView: View {
                     .frame(width: Constants.trackLabelWidth, height: Constants.subtitleTrackHeight)
                     .background(Constants.trackLabelBg)
             }
+
+            if !vm.textCardTrack.entries.isEmpty {
+                Text("TC")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Constants.textCardTrackColor)
+                    .frame(width: Constants.trackLabelWidth, height: Constants.textCardTrackHeight)
+                    .background(Constants.trackLabelBg)
+            }
         }
         .frame(width: Constants.trackLabelWidth)
     }
@@ -105,6 +116,15 @@ struct TimelineView: View {
                         color: Constants.subtitleS2Color
                     )
                     .frame(height: Constants.subtitleTrackHeight)
+                }
+
+                if !vm.textCardTrack.entries.isEmpty {
+                    TextCardTrackView(
+                        track: vm.textCardTrack,
+                        vm: vm,
+                        color: Constants.textCardTrackColor
+                    )
+                    .frame(height: Constants.textCardTrackHeight)
                 }
             }
 
@@ -467,6 +487,151 @@ private struct SubtitleEditPopover: View {
                         startTime: start,
                         endTime: end
                     )
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding()
+        .onAppear {
+            editText = entry.text
+            editStart = formatSeconds(entry.startTime)
+            editEnd = formatSeconds(entry.endTime)
+        }
+    }
+
+    private func formatSeconds(_ s: Double) -> String {
+        let h = Int(s) / 3600
+        let m = (Int(s) % 3600) / 60
+        let sec = s - Double(h * 3600 + m * 60)
+        return String(format: "%02d:%02d:%06.3f", h, m, sec)
+    }
+
+    private func parseSeconds(_ str: String) -> Double? {
+        let parts = str.components(separatedBy: ":")
+        guard parts.count == 3,
+              let h = Double(parts[0]),
+              let m = Double(parts[1]),
+              let s = Double(parts[2]) else { return nil }
+        return h * 3600 + m * 60 + s
+    }
+}
+
+// MARK: - 字卡軌道
+
+struct TextCardTrackView: View {
+    let track: TextCardTrack
+    @Bindable var vm: ProjectViewModel
+    let color: Color
+
+    @State private var editingEntryID: UUID?
+    @State private var popoverAnchorX: CGFloat = 0
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            color.opacity(0.15)
+
+            ForEach(track.entries) { entry in
+                let x = vm.timelineVM.timeToX(entry.startTime)
+                let width = vm.timelineVM.segmentWidth(duration: entry.duration)
+
+                RoundedRectangle(cornerRadius: Constants.subtitleEntryCornerRadius)
+                    .fill(color.opacity(vm.selectedTextCardID == entry.id ? 0.9 : 0.6))
+                    .frame(width: max(width, 4), height: Constants.textCardTrackHeight - 8)
+                    .overlay(
+                        Text(entry.text)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .padding(.horizontal, 3)
+                        , alignment: .leading
+                    )
+                    .offset(x: x, y: 4)
+                    .allowsHitTesting(false)
+            }
+
+            Color.clear
+                .frame(width: 1, height: 1)
+                .offset(x: popoverAnchorX, y: Constants.textCardTrackHeight / 2)
+                .popover(isPresented: Binding(
+                    get: { editingEntryID != nil },
+                    set: { if !$0 { editingEntryID = nil } }
+                )) {
+                    if let entryID = editingEntryID,
+                       let entry = track.entries.first(where: { $0.id == entryID }) {
+                        TextCardEditPopover(entry: entry, vm: vm)
+                    }
+                }
+        }
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            SpatialTapGesture()
+                .onEnded { value in
+                    let x = value.location.x
+                    for entry in track.entries {
+                        let entryX = vm.timelineVM.timeToX(entry.startTime)
+                        let entryWidth = vm.timelineVM.segmentWidth(duration: entry.duration)
+                        if x >= entryX && x <= entryX + max(entryWidth, 4) {
+                            vm.selectedTextCardID = entry.id
+                            return
+                        }
+                    }
+                }
+        )
+        .highPriorityGesture(
+            SpatialTapGesture(count: 2)
+                .onEnded { value in
+                    let x = value.location.x
+                    for entry in track.entries {
+                        let entryX = vm.timelineVM.timeToX(entry.startTime)
+                        let entryWidth = vm.timelineVM.segmentWidth(duration: entry.duration)
+                        if x >= entryX && x <= entryX + max(entryWidth, 4) {
+                            popoverAnchorX = entryX + max(entryWidth, 4) / 2
+                            editingEntryID = entry.id
+                            return
+                        }
+                    }
+                }
+        )
+    }
+}
+
+private struct TextCardEditPopover: View {
+    let entry: TextCardEntry
+    @Bindable var vm: ProjectViewModel
+
+    @State private var editText: String = ""
+    @State private var editStart: String = ""
+    @State private var editEnd: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("編輯字卡")
+                .font(.headline)
+
+            TextEditor(text: $editText)
+                .font(.system(size: 13))
+                .frame(width: 250, height: 60)
+                .border(Color(white: 0.3))
+
+            HStack {
+                Text("開始")
+                TextField("", text: $editStart)
+                    .frame(width: 80)
+                    .textFieldStyle(.roundedBorder)
+                Text("結束")
+                TextField("", text: $editEnd)
+                    .frame(width: 80)
+                    .textFieldStyle(.roundedBorder)
+            }
+            .font(.system(size: 11))
+
+            HStack {
+                Spacer()
+                Button("確定") {
+                    let start = parseSeconds(editStart) ?? entry.startTime
+                    let end = parseSeconds(editEnd) ?? entry.endTime
+                    vm.updateTextCardText(id: entry.id, text: editText)
+                    vm.updateTextCardTime(id: entry.id, startTime: start, endTime: end)
                 }
                 .buttonStyle(.borderedProminent)
             }

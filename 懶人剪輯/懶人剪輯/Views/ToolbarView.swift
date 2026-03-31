@@ -7,6 +7,7 @@ struct ToolbarView: View {
     @State private var showSubtitleSettings = false
     @State private var showAutoSaveSettings = false
     @State private var showFilterPanel = false
+    @State private var showTextCardSettings = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -73,6 +74,15 @@ struct ToolbarView: View {
                 SubtitleSettingsPanel(vm: vm)
             }
             .help("字幕匯入與設定")
+
+            // 字卡
+            toolbarButton(icon: "text.bubble", label: "字卡") {
+                showTextCardSettings.toggle()
+            }
+            .popover(isPresented: $showTextCardSettings) {
+                TextCardSettingsPanel(vm: vm)
+            }
+            .help("文字卡片設定")
 
             // 濾鏡
             toolbarButton(icon: "camera.filters", label: "濾鏡") {

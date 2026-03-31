@@ -279,19 +279,21 @@ enum VideoFilterPreset: String, CaseIterable, Identifiable {
         }
     }
 
-    /// 為匯出建立帶濾鏡 + 字幕燒錄的 AVVideoComposition
+    /// 為匯出建立帶濾鏡 + 字幕燒錄 + 字卡的 AVVideoComposition
     static func makeExportVideoComposition(
         for asset: AVAsset,
         filter: VideoFilterPreset,
         intensity: Float,
         primaryTrack: SubtitleRenderer.TrackSnapshot?,
-        secondaryTrack: SubtitleRenderer.TrackSnapshot?
+        secondaryTrack: SubtitleRenderer.TrackSnapshot?,
+        textCardTrack: TextCardRenderer.TrackSnapshot? = nil
     ) async -> AVMutableVideoComposition? {
         let hasFilter = filter != .none
         let hasSubs = (primaryTrack?.isVisible == true && !(primaryTrack?.entries.isEmpty ?? true))
             || (secondaryTrack?.isVisible == true && !(secondaryTrack?.entries.isEmpty ?? true))
+        let hasTextCards = !(textCardTrack?.entries.isEmpty ?? true)
 
-        guard hasFilter || hasSubs else { return nil }
+        guard hasFilter || hasSubs || hasTextCards else { return nil }
 
         do {
             let renderSize = try await resolveRenderSize(for: asset)
@@ -317,6 +319,17 @@ enum VideoFilterPreset: String, CaseIterable, Identifiable {
                             renderSize: renderSize,
                             primaryTrack: primaryTrack,
                             secondaryTrack: secondaryTrack
+                        )
+                    }
+
+                    // 3) 燒錄字卡
+                    if hasTextCards {
+                        let time = request.compositionTime.seconds
+                        output = TextCardRenderer.render(
+                            onto: output,
+                            at: time,
+                            renderSize: renderSize,
+                            track: textCardTrack
                         )
                     }
 

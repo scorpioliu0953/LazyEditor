@@ -67,6 +67,23 @@ struct ProjectSerializer {
             doc.secondarySubtitle = encodeSubtitleTrack(vm.secondarySubtitleTrack)
         }
 
+        // Text cards
+        if !vm.textCardTrack.entries.isEmpty {
+            doc.textCards = vm.textCardTrack.entries.map {
+                TextCardEntryDocument(
+                    id: $0.id.uuidString,
+                    startTime: $0.startTime,
+                    endTime: $0.endTime,
+                    text: $0.text,
+                    style: $0.style.rawValue,
+                    positionX: Double($0.positionX),
+                    positionY: Double($0.positionY),
+                    scale: Double($0.scale),
+                    widthRatio: Double($0.widthRatio)
+                )
+            }
+        }
+
         // Audio settings
         let as_ = vm.audioSettings
         doc.audioSettings = AudioSettingsDocument(
@@ -213,6 +230,26 @@ struct ProjectSerializer {
         }
         if let secondary = doc.secondarySubtitle {
             decodeSubtitleTrack(secondary, into: vm.secondarySubtitleTrack)
+        }
+
+        // 還原字卡
+        vm.textCardTrack.entries.removeAll()
+        if let textCards = doc.textCards {
+            vm.textCardTrack.entries = textCards.compactMap { cardDoc in
+                guard let id = UUID(uuidString: cardDoc.id),
+                      let style = TextCardStyle(rawValue: cardDoc.style) else { return nil }
+                return TextCardEntry(
+                    id: id,
+                    startTime: cardDoc.startTime,
+                    endTime: cardDoc.endTime,
+                    text: cardDoc.text,
+                    style: style,
+                    positionX: CGFloat(cardDoc.positionX),
+                    positionY: CGFloat(cardDoc.positionY),
+                    scale: CGFloat(cardDoc.scale),
+                    widthRatio: CGFloat(cardDoc.widthRatio)
+                )
+            }
         }
 
         // 還原音訊設定

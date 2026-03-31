@@ -8,6 +8,7 @@ struct ProjectDocument: Codable {
     var secondarySubtitle: SubtitleTrackDocument?
     var audioSettings: AudioSettingsDocument = .init()
     var silenceConfig: SilenceConfigDocument = .init()
+    var textCards: [TextCardEntryDocument]?
     var filterPreset: String = "none"
     var filterIntensity: Float = 1.0
     var playheadPosition: Double = 0
@@ -47,6 +48,18 @@ struct SubtitleSettingsDocument: Codable {
     var fontSizeRatio: Double = 0.055
     var verticalPositionRatio: Double = 0.88
     var strokeWidth: Double = 1.2
+}
+
+struct TextCardEntryDocument: Codable {
+    var id: String
+    var startTime: Double
+    var endTime: Double
+    var text: String
+    var style: String
+    var positionX: Double
+    var positionY: Double
+    var scale: Double
+    var widthRatio: Double
 }
 
 struct AudioSettingsDocument: Codable {

@@ -17,6 +17,7 @@ struct MainEditorView: View {
                         ZStack {
                             VideoPreviewView(player: vm.playback.player)
                             SubtitleOverlayView(vm: vm)
+                            TextCardOverlayView(vm: vm)
                         }
                     }
                 }

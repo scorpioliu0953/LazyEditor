@@ -52,6 +52,10 @@ nonisolated enum Constants {
     static let subtitleS2Color = Color(red: 0.35, green: 0.55, blue: 0.70)
     static let subtitleEntryCornerRadius: CGFloat = 3
 
+    // MARK: - 字卡軌
+    static let textCardTrackHeight: CGFloat = 40
+    static let textCardTrackColor = Color(red: 0.70, green: 0.50, blue: 0.30)
+
     // MARK: - 匯出
     static let defaultExportFilename = "懶人剪輯_輸出.mp4"
     static let exportProgressPollInterval: TimeInterval = 0.1
