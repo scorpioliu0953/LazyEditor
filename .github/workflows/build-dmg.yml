@@ -1,0 +1,56 @@
+name: Build DMG
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app || sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Build Release
+        run: |
+          cd 懶人剪輯
+          xcodebuild -project 懶人剪輯.xcodeproj \
+            -scheme 懶人剪輯 \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM="" \
+            ENABLE_APP_SANDBOX=NO \
+            build
+
+      - name: Create DMG
+        run: |
+          APP_PATH="懶人剪輯/build/Build/Products/Release/懶人剪輯.app"
+          DMG_NAME="LazyEditor.dmg"
+          STAGING="dmg_staging"
+
+          mkdir -p "$STAGING"
+          cp -R "$APP_PATH" "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
+
+          hdiutil create -volname "懶人剪輯" \
+            -srcfolder "$STAGING" \
+            -ov -format UDZO \
+            "$DMG_NAME"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: LazyEditor-DMG
+          path: LazyEditor.dmg
+
+      - name: Create Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: LazyEditor.dmg
