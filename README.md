@@ -28,7 +28,10 @@
 
 ### 下載 DMG
 
-前往 [GitHub Actions](https://github.com/scorpioliu0953/LazyEditor/actions) 頁面，點選最新的 Build DMG workflow run，下載 `LazyEditor-DMG` artifact。
+[**下載最新版 DMG**](https://nightly.link/scorpioliu0953/LazyEditor/workflows/build-dmg/main/LazyEditor-DMG.zip)
+
+> 上方連結會自動下載 `main` 分支最新一次成功編譯的 DMG（透過 [nightly.link](https://nightly.link)，無需登入 GitHub）。
+> 也可前往 [GitHub Actions](https://github.com/scorpioliu0953/LazyEditor/actions) 頁面手動下載。
 
 ### 從原始碼編譯
 
