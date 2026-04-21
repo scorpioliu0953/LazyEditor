@@ -79,7 +79,11 @@ struct ProjectSerializer {
                     positionX: Double($0.positionX),
                     positionY: Double($0.positionY),
                     scale: Double($0.scale),
-                    widthRatio: Double($0.widthRatio)
+                    widthRatio: Double($0.widthRatio),
+                    heightRatio: Double($0.heightRatio),
+                    cornerRadius: Double($0.cornerRadius),
+                    fadeInOut: $0.fadeInOut,
+                    soundEffect: $0.soundEffect.rawValue
                 )
             }
         }
@@ -129,7 +133,8 @@ struct ProjectSerializer {
                 fontName: track.settings.fontName,
                 fontSizeRatio: Double(track.settings.fontSizeRatio),
                 verticalPositionRatio: Double(track.settings.verticalPositionRatio),
-                strokeWidth: Double(track.settings.strokeWidth)
+                strokeWidth: Double(track.settings.strokeWidth),
+                letterSpacing: Double(track.settings.letterSpacing)
             ),
             language: track.language.rawValue,
             isVisible: track.isVisible
@@ -247,7 +252,11 @@ struct ProjectSerializer {
                     positionX: CGFloat(cardDoc.positionX),
                     positionY: CGFloat(cardDoc.positionY),
                     scale: CGFloat(cardDoc.scale),
-                    widthRatio: CGFloat(cardDoc.widthRatio)
+                    widthRatio: CGFloat(cardDoc.widthRatio),
+                    heightRatio: CGFloat(cardDoc.heightRatio),
+                    cornerRadius: CGFloat(cardDoc.cornerRadius),
+                    fadeInOut: cardDoc.fadeInOut,
+                    soundEffect: TextCardSoundEffect(rawValue: cardDoc.soundEffect) ?? .none
                 )
             }
         }
@@ -300,6 +309,7 @@ struct ProjectSerializer {
         track.settings.fontSizeRatio = CGFloat(doc.settings.fontSizeRatio)
         track.settings.verticalPositionRatio = CGFloat(doc.settings.verticalPositionRatio)
         track.settings.strokeWidth = CGFloat(doc.settings.strokeWidth)
+        track.settings.letterSpacing = CGFloat(doc.settings.letterSpacing)
         if let lang = SubtitleLanguage(rawValue: doc.language) {
             track.language = lang
         }

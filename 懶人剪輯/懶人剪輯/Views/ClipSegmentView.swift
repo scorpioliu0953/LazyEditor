@@ -38,11 +38,11 @@ struct ClipSegmentView: View {
         .clipped()
     }
 
-    private var waveformSamples: [Float]? {
+    private var waveformSamples: ArraySlice<Float>? {
         guard let data = waveformData else { return nil }
         let start = max(0, sampleRange.lowerBound)
         let end = min(data.count, sampleRange.upperBound)
         guard start < end else { return nil }
-        return Array(data[start..<end])
+        return data[start..<end]
     }
 }

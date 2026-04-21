@@ -48,6 +48,7 @@ struct SubtitleSettingsDocument: Codable {
     var fontSizeRatio: Double = 0.055
     var verticalPositionRatio: Double = 0.88
     var strokeWidth: Double = 1.2
+    var letterSpacing: Double = 0
 }
 
 struct TextCardEntryDocument: Codable {
@@ -60,6 +61,10 @@ struct TextCardEntryDocument: Codable {
     var positionY: Double
     var scale: Double
     var widthRatio: Double
+    var heightRatio: Double = 0
+    var cornerRadius: Double = -1
+    var fadeInOut: Bool = false
+    var soundEffect: String = "none"
 }
 
 struct AudioSettingsDocument: Codable {

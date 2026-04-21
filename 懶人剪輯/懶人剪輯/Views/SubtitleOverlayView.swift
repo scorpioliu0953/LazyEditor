@@ -68,6 +68,7 @@ struct SubtitleOverlayView: View {
                         .font(.custom(settings.fontName, size: fontSize))
                         .fontWeight(settings.fontWeight)
                         .foregroundStyle(settings.strokeColor)
+                        .tracking(settings.letterSpacing)
                         .multilineTextAlignment(.center)
                         .lineLimit(3)
                         .frame(maxWidth: maxWidth)
@@ -80,10 +81,12 @@ struct SubtitleOverlayView: View {
                 .font(.custom(settings.fontName, size: fontSize))
                 .fontWeight(settings.fontWeight)
                 .foregroundStyle(settings.textColor)
+                .tracking(settings.letterSpacing)
                 .multilineTextAlignment(.center)
                 .lineLimit(3)
                 .frame(maxWidth: maxWidth)
         }
+        .drawingGroup()
         .padding(settings.backgroundPadding)
         .background(
             settings.backgroundColor != .clear

@@ -11,19 +11,18 @@ final class ExportViewModel {
     func showSavePanel() -> URL? {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.mpeg4Movie]
-        panel.nameFieldStringValue = Constants.defaultExportFilename
+        panel.nameFieldStringValue = "懶人剪輯_輸出.mp4"
         panel.title = "匯出影片"
         panel.prompt = "匯出"
-
         guard panel.runModal() == .OK else { return nil }
         return panel.url
     }
 
     func showSavePanelForAudio() -> URL? {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.mpeg4Audio, .mp3]
+        panel.allowedContentTypes = [.mpeg4Audio]
         panel.nameFieldStringValue = "懶人剪輯_輸出.m4a"
-        panel.title = "匯出音頻"
+        panel.title = "匯出音訊"
         panel.prompt = "匯出"
 
         guard panel.runModal() == .OK else { return nil }

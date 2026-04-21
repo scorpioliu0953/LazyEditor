@@ -29,17 +29,10 @@ struct FilterPanel: View {
                         .font(.system(size: 12))
                         .foregroundStyle(Color(white: 0.7))
 
-                    Slider(
-                        value: Binding(
-                            get: { vm.filterIntensity },
-                            set: { newValue in
-                                vm.filterIntensity = newValue
-                                vm.rebuildComposition()
-                            }
-                        ),
-                        in: 0...1,
-                        step: 0.05
-                    )
+                    Slider(value: $vm.filterIntensity, in: 0...1, step: 0.05)
+                        .onChange(of: vm.filterIntensity) {
+                            vm.updateFilterPreview()
+                        }
 
                     Text("\(Int(vm.filterIntensity * 100))%")
                         .font(.system(size: 11, design: .monospaced))

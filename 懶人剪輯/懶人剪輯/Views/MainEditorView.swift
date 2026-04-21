@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MainEditorView: View {
     @Environment(ProjectViewModel.self) var vm
+    @FocusState private var isMainFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -37,24 +38,39 @@ struct MainEditorView: View {
         }
         .background(Color(white: 0.1))
         .focusable()
+        .focused($isMainFocused)
+        .onAppear { isMainFocused = true }
         .onKeyPress(.space) {
+            guard !vm.isEditingTextCard else { return .ignored }
             vm.playback.togglePlayPause()
             return .handled
         }
         .onKeyPress("a") {
+            guard !vm.isEditingTextCard else { return .ignored }
             vm.toolMode = .selection
             return .handled
         }
         .onKeyPress("b") {
+            guard !vm.isEditingTextCard else { return .ignored }
             vm.toolMode = .blade
             return .handled
         }
         .onKeyPress(.delete) {
+            guard !vm.isEditingTextCard else { return .ignored }
+            vm.deleteSelectedSegments()
+            return .handled
+        }
+        .onKeyPress(.deleteForward) {
+            guard !vm.isEditingTextCard else { return .ignored }
             vm.deleteSelectedSegments()
             return .handled
         }
         .onChange(of: vm.playback.currentTime) {
             vm.syncPlayheadFromPlayer()
+        }
+        .onChange(of: vm.timeline.selectedSegmentIDs) {
+            // 選取片段後重新取得焦點，確保 Delete 鍵可用
+            isMainFocused = true
         }
     }
 

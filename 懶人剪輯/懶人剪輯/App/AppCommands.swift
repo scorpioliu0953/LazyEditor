@@ -68,6 +68,7 @@ struct AppCommands: Commands {
                 vm.playback.togglePlayPause()
             }
             .keyboardShortcut(.space, modifiers: [])
+            .disabled(vm.isEditingTextCard)
         }
     }
 }

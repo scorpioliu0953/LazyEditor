@@ -159,6 +159,18 @@ struct SubtitleSettingsPanel: View {
             }
 
             HStack {
+                Text("文字間距")
+                Slider(
+                    value: Bindable(track.settings).letterSpacing,
+                    in: 0...10,
+                    step: 0.5
+                )
+                Text(String(format: "%.1f", track.settings.letterSpacing))
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 30)
+            }
+
+            HStack {
                 Text("垂直位置")
                 Slider(
                     value: Bindable(track.settings).verticalPositionRatio,

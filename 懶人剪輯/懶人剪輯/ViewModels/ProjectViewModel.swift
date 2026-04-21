@@ -19,6 +19,7 @@ final class ProjectViewModel {
     // MARK: - 字卡
     var textCardTrack = TextCardTrack()
     var selectedTextCardID: UUID?
+    var isEditingTextCard: Bool = false
 
     // MARK: - 字幕
     var primarySubtitleTrack: SubtitleTrack = {
@@ -34,7 +35,7 @@ final class ProjectViewModel {
         track.language = .english
         track.settings.fontName = "Helvetica Neue"
         track.settings.fontSizeRatio = 0.035
-        track.settings.verticalPositionRatio = 0.92
+        track.settings.verticalPositionRatio = 0.95
         return track
     }()
 
@@ -52,6 +53,7 @@ final class ProjectViewModel {
     let exportVM = ExportViewModel()
 
     private var compositionTask: Task<Void, Never>?
+    private var filterUpdateTask: Task<Void, Never>?
 
     // MARK: - 素材列表
 
@@ -140,31 +142,34 @@ final class ProjectViewModel {
             let clip = VideoClip(url: url)
             clips[clip.id] = clip
 
-            let segment = ClipSegment(
-                clipID: clip.id,
-                startTime: 0,
-                endTime: 0
-            )
-            timeline.segments.append(segment)
-
-            let segmentIndex = timeline.segments.count - 1
-
             Task {
                 defer {
                     if accessGranted { url.stopAccessingSecurityScopedResource() }
                 }
 
-                let duration = try await clip.asset.load(.duration)
-                clip.duration = duration.seconds
-
-                if segmentIndex < timeline.segments.count {
-                    let old = timeline.segments[segmentIndex]
-                    timeline.segments[segmentIndex] = ClipSegment(
-                        clipID: old.clipID,
-                        startTime: old.startTime,
-                        endTime: duration.seconds
-                    )
+                // 先載入時長，再加入 segment（避免零時長 segment 導致空 composition）
+                let duration: Double
+                do {
+                    let cmDuration = try await clip.asset.load(.duration)
+                    duration = cmDuration.seconds
+                    guard duration.isFinite && duration > 0 else {
+                        debugLog("[Import] 無效時長: \(url.lastPathComponent) duration=\(cmDuration.seconds)")
+                        clips.removeValue(forKey: clip.id)
+                        return
+                    }
+                } catch {
+                    debugLog("[Import] 無法載入時長: \(url.lastPathComponent) error=\(error.localizedDescription)")
+                    clips.removeValue(forKey: clip.id)
+                    return
                 }
+
+                clip.duration = duration
+                let segment = ClipSegment(
+                    clipID: clip.id,
+                    startTime: 0,
+                    endTime: duration
+                )
+                timeline.segments.append(segment)
 
                 do {
                     let waveform = try await AudioWaveformExtractor.extractWaveform(from: clip.asset)
@@ -316,6 +321,26 @@ final class ProjectViewModel {
         )
     }
 
+    // MARK: - 濾鏡即時預覽（不重建 composition）
+
+    /// 僅更新 videoComposition（濾鏡強度/種類），不重建整個 composition
+    func updateFilterPreview() {
+        filterUpdateTask?.cancel()
+        filterUpdateTask = Task {
+            try? await Task.sleep(for: .milliseconds(50))
+            guard !Task.isCancelled else { return }
+
+            guard let currentItem = playback.player.currentItem else { return }
+            let asset = currentItem.asset
+
+            let videoComp = await selectedFilter.makeVideoComposition(
+                for: asset,
+                intensity: filterIntensity
+            )
+            currentItem.videoComposition = videoComp
+        }
+    }
+
     // MARK: - 匯出
 
     func exportVideo() {
@@ -332,8 +357,17 @@ final class ProjectViewModel {
         let primarySnap = SubtitleRenderer.snapshot(from: primarySubtitleTrack)
         let secondarySnap = SubtitleRenderer.snapshot(from: secondarySubtitleTrack)
         let textCardSnap = TextCardRenderer.snapshot(from: textCardTrack)
+        let soundEffectCards = textCardTrack.entries.filter { $0.soundEffect != .none }
+            .map { (startTime: $0.startTime, effect: $0.soundEffect) }
 
         Task {
+            var processedAudioURL: URL? = nil
+            defer {
+                if let url = processedAudioURL {
+                    try? FileManager.default.removeItem(at: url)
+                }
+            }
+
             do {
                 let result = try await VideoCompositionBuilder.buildCompositionWithMix(
                     from: timeline.segments,
@@ -341,24 +375,40 @@ final class ProjectViewModel {
                 )
                 let composition = result.composition
 
+                // 混入字卡音效
+                if !soundEffectCards.isEmpty {
+                    let precisionTimescale: CMTimeScale = 600_000
+                    for sfx in soundEffectCards {
+                        guard let sfxURL = SoundEffectGenerator.shared.urlForEffect(sfx.effect) else { continue }
+                        let sfxAsset = AVURLAsset(url: sfxURL)
+                        guard let sfxAudioTrack = try? await sfxAsset.loadTracks(withMediaType: .audio).first,
+                              let sfxTrack = composition.addMutableTrack(
+                                  withMediaType: .audio,
+                                  preferredTrackID: kCMPersistentTrackID_Invalid
+                              ) else { continue }
+                        let sfxDuration = try await sfxAsset.load(.duration)
+                        let insertTime = CMTimeMakeWithSeconds(sfx.startTime, preferredTimescale: precisionTimescale)
+                        try? sfxTrack.insertTimeRange(
+                            CMTimeRange(start: .zero, duration: sfxDuration),
+                            of: sfxAudioTrack,
+                            at: insertTime
+                        )
+                    }
+                }
+
                 let exportVM = self.exportVM
 
-                // 暫存處理後音檔路徑（音訊匯出後才清理）
-                var processedAudioURL: URL? = nil
-
                 if needsAudioProcessing {
-                    // 離線處理音頻
                     let audioURL = try await AudioProcessor.processAudio(
                         from: composition,
                         settings: settingsSnapshot
                     ) { progress in
                         Task { @MainActor in
-                            exportVM.exportProgress = progress * 0.4
+                            exportVM.exportProgress = progress * 0.3
                         }
                     }
                     processedAudioURL = audioURL
 
-                    // 替換 composition 中的音軌為處理後的音頻
                     let existingAudioTracks = try await composition.loadTracks(withMediaType: .audio)
                     for track in existingAudioTracks {
                         composition.removeTrack(track)
@@ -370,7 +420,6 @@ final class ProjectViewModel {
                            withMediaType: .audio,
                            preferredTrackID: kCMPersistentTrackID_Invalid
                        ) {
-                        // 以影片軌長度為準，避免處理後音檔長度不一致
                         let videoTracks = try await composition.loadTracks(withMediaType: .video)
                         let targetDuration: CMTime
                         if let vt = videoTracks.first {
@@ -387,100 +436,40 @@ final class ProjectViewModel {
                         )
                     }
 
-                    if let videoComp = await VideoFilterPreset.makeExportVideoComposition(
-                        for: composition,
+                    try await VideoExporter.exportWithFilter(
+                        composition: composition,
                         filter: filterPreset,
-                        intensity: filterIntensityVal,
+                        filterIntensity: filterIntensityVal,
                         primaryTrack: primarySnap,
                         secondaryTrack: secondarySnap,
-                        textCardTrack: textCardSnap
-                    ) {
-                        try await VideoExporter.exportWithFilter(
-                            composition: composition,
-                            videoComposition: videoComp,
-                            audioMix: nil,
-                            to: outputURL
-                        ) { progress in
-                            Task { @MainActor in
-                                exportVM.exportProgress = 0.4 + progress * 0.6
-                            }
-                        }
-                    } else {
-                        try await VideoExporter.export(
-                            composition: composition,
-                            to: outputURL
-                        ) { progress in
-                            Task { @MainActor in
-                                exportVM.exportProgress = 0.4 + progress * 0.6
-                            }
+                        textCardTrack: textCardSnap,
+                        audioMix: nil,
+                        to: outputURL
+                    ) { progress in
+                        Task { @MainActor in
+                            exportVM.exportProgress = 0.3 + progress * 0.7
                         }
                     }
                 } else {
-                    if let videoComp = await VideoFilterPreset.makeExportVideoComposition(
-                        for: composition,
+                    try await VideoExporter.exportWithFilter(
+                        composition: composition,
                         filter: filterPreset,
-                        intensity: filterIntensityVal,
+                        filterIntensity: filterIntensityVal,
                         primaryTrack: primarySnap,
                         secondaryTrack: secondarySnap,
-                        textCardTrack: textCardSnap
-                    ) {
-                        try await VideoExporter.exportWithFilter(
-                            composition: composition,
-                            videoComposition: videoComp,
-                            audioMix: result.audioMix,
-                            to: outputURL
-                        ) { progress in
-                            Task { @MainActor in
-                                exportVM.exportProgress = progress * 1.0
-                            }
-                        }
-                    } else {
-                        try await VideoExporter.export(
-                            composition: composition,
-                            to: outputURL,
-                            audioMix: result.audioMix
-                        ) { progress in
-                            Task { @MainActor in
-                                exportVM.exportProgress = progress * 1.0
-                            }
+                        textCardTrack: textCardSnap,
+                        audioMix: result.audioMix,
+                        to: outputURL
+                    ) { progress in
+                        Task { @MainActor in
+                            exportVM.exportProgress = progress
                         }
                     }
                 }
 
-                // MP4 匯出完成 → 立即結束進度條
                 exportVM.exportProgress = 1.0
                 exportVM.isExporting = false
-
-                // M4A/WAV 匯出在背景 fire-and-forget，不阻塞 UI
-                let audioMixForExport = needsAudioProcessing ? nil : result.audioMix
-                let m4aURL = outputURL.deletingPathExtension().appendingPathExtension("m4a")
-                let wavURL = outputURL.deletingPathExtension().appendingPathExtension("wav")
-                let capturedProcessedAudioURL = processedAudioURL
-
-                Task.detached(priority: .utility) {
-                    do {
-                        try await VideoExporter.exportAudio(
-                            composition: composition,
-                            audioMix: audioMixForExport,
-                            to: m4aURL
-                        ) { _ in }
-                        debugLog("[Export] M4A 匯出完成: \(m4aURL.lastPathComponent)")
-
-                        try await VideoExporter.exportAudio(
-                            composition: composition,
-                            audioMix: audioMixForExport,
-                            to: wavURL
-                        ) { _ in }
-                        debugLog("[Export] WAV 匯出完成: \(wavURL.lastPathComponent)")
-                    } catch {
-                        debugLog("[Export] 音訊匯出失敗: \(error)")
-                    }
-
-                    // 清理暫存檔（在音訊匯出之後，因為 composition 還需要讀取）
-                    if let url = capturedProcessedAudioURL {
-                        try? FileManager.default.removeItem(at: url)
-                    }
-                }
+                debugLog("[Export] 影片匯出完成: \(outputURL.lastPathComponent)")
             } catch {
                 exportVM.isExporting = false
                 exportVM.exportError = error.localizedDescription
@@ -489,12 +478,16 @@ final class ProjectViewModel {
         }
     }
 
-    func exportAudioMP3() {
+    /// 純音訊匯出（使用 AVAssetExportSession 最簡路徑）
+    func exportAudioOnly() {
         guard let outputURL = exportVM.showSavePanelForAudio() else { return }
 
         exportVM.isExporting = true
         exportVM.exportProgress = 0
         exportVM.exportError = nil
+
+        let soundEffectCards = textCardTrack.entries.filter { $0.soundEffect != .none }
+            .map { (startTime: $0.startTime, effect: $0.soundEffect) }
 
         Task {
             do {
@@ -502,24 +495,71 @@ final class ProjectViewModel {
                     from: timeline.segments,
                     clips: clips
                 )
+                let composition = result.composition
 
-                let exportVM = self.exportVM
-
-                try await VideoExporter.exportAudio(
-                    composition: result.composition,
-                    audioMix: result.audioMix,
-                    to: outputURL
-                ) { progress in
-                    Task { @MainActor in
-                        exportVM.exportProgress = progress
+                // 混入字卡音效
+                if !soundEffectCards.isEmpty {
+                    let precisionTimescale: CMTimeScale = 600_000
+                    for sfx in soundEffectCards {
+                        guard let sfxURL = SoundEffectGenerator.shared.urlForEffect(sfx.effect) else { continue }
+                        let sfxAsset = AVURLAsset(url: sfxURL)
+                        guard let sfxAudioTrack = try? await sfxAsset.loadTracks(withMediaType: .audio).first,
+                              let sfxTrack = composition.addMutableTrack(
+                                  withMediaType: .audio,
+                                  preferredTrackID: kCMPersistentTrackID_Invalid
+                              ) else { continue }
+                        let sfxDuration = try await sfxAsset.load(.duration)
+                        let insertTime = CMTimeMakeWithSeconds(sfx.startTime, preferredTimescale: precisionTimescale)
+                        try? sfxTrack.insertTimeRange(
+                            CMTimeRange(start: .zero, duration: sfxDuration),
+                            of: sfxAudioTrack,
+                            at: insertTime
+                        )
                     }
                 }
 
-                exportVM.isExporting = false
+                // 直接用 AVAssetExportSession（Apple 原生最可靠路徑）
+                guard let session = AVAssetExportSession(
+                    asset: composition,
+                    presetName: AVAssetExportPresetAppleM4A
+                ) else {
+                    throw VideoExporter.ExportError.cannotCreateSession
+                }
+
+                let fm = FileManager.default
+                if fm.fileExists(atPath: outputURL.path) {
+                    try fm.removeItem(at: outputURL)
+                }
+
+                session.outputURL = outputURL
+                session.outputFileType = .m4a
+                session.audioMix = result.audioMix
+
+                let exportVM = self.exportVM
+
+                // 輪詢進度
+                let progressTimer = Task {
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .milliseconds(200))
+                        let p = session.progress
+                        await MainActor.run { exportVM.exportProgress = p }
+                    }
+                }
+
+                await session.export()
+                progressTimer.cancel()
+
+                if session.status == .completed {
+                    exportVM.exportProgress = 1.0
+                    exportVM.isExporting = false
+                    debugLog("[Export] 純音訊匯出完成: \(outputURL.lastPathComponent)")
+                } else {
+                    throw VideoExporter.ExportError.exportFailed(session.error)
+                }
             } catch {
                 exportVM.isExporting = false
                 exportVM.exportError = error.localizedDescription
-                debugLog("[Export] 音訊匯出失敗: \(error)")
+                debugLog("[Export] 純音訊匯出失敗: \(error)")
             }
         }
     }
@@ -559,6 +599,21 @@ final class ProjectViewModel {
         }
     }
 
+    func updateTextCardSize(id: UUID, widthRatio: CGFloat, heightRatio: CGFloat) {
+        if let idx = textCardTrack.entries.firstIndex(where: { $0.id == id }) {
+            textCardTrack.entries[idx].widthRatio = widthRatio
+            textCardTrack.entries[idx].heightRatio = heightRatio
+            markDirty()
+        }
+    }
+
+    func updateTextCardCornerRadius(id: UUID, cornerRadius: CGFloat) {
+        if let idx = textCardTrack.entries.firstIndex(where: { $0.id == id }) {
+            textCardTrack.entries[idx].cornerRadius = cornerRadius
+            markDirty()
+        }
+    }
+
     func updateTextCardStyle(id: UUID, style: TextCardStyle) {
         if let idx = textCardTrack.entries.firstIndex(where: { $0.id == id }) {
             textCardTrack.entries[idx].style = style
@@ -570,6 +625,20 @@ final class ProjectViewModel {
         if let idx = textCardTrack.entries.firstIndex(where: { $0.id == id }) {
             textCardTrack.entries[idx].startTime = startTime
             textCardTrack.entries[idx].endTime = endTime
+            markDirty()
+        }
+    }
+
+    func updateTextCardFadeInOut(id: UUID, fadeInOut: Bool) {
+        if let idx = textCardTrack.entries.firstIndex(where: { $0.id == id }) {
+            textCardTrack.entries[idx].fadeInOut = fadeInOut
+            markDirty()
+        }
+    }
+
+    func updateTextCardSoundEffect(id: UUID, soundEffect: TextCardSoundEffect) {
+        if let idx = textCardTrack.entries.firstIndex(where: { $0.id == id }) {
+            textCardTrack.entries[idx].soundEffect = soundEffect
             markDirty()
         }
     }
@@ -676,41 +745,145 @@ final class ProjectViewModel {
 
     // MARK: - 內部
 
+    /// 上一次的預覽暫存檔 URL（用於清理）
+    private var lastFlatPreviewURL: URL?
+
     /// 重建預覽用 composition（使用代理檔）
+    /// 策略：先立即用 composition 替換 player（即時回饋），
+    /// 再在背景匯出為單一暫存檔，完成後靜默切換（長片順暢播放）。
     func rebuildComposition() {
         markDirty()
+        timelineVM.updateContentWidth(segments: timeline.segments)
         compositionTask?.cancel()
         compositionTask = Task {
-            try? await Task.sleep(for: .milliseconds(100))
+            try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
 
             do {
-                let tap = AudioEQTap.createTap(context: self.playback.eqTapContext)
                 let result = try await VideoCompositionBuilder.buildCompositionWithMix(
                     from: timeline.segments,
                     clips: clips,
-                    useProxy: true,
-                    audioTap: tap
+                    useProxy: true
                 )
 
-                // 濾鏡：建立 AVVideoComposition
+                // 空 composition 不替換 player item
+                guard result.composition.duration.seconds > 0 else { return }
+                guard !Task.isCancelled else { return }
+
+                // ── 第一步：立即用 composition 替換 player（即時回饋） ──
                 let videoComp = await selectedFilter.makeVideoComposition(
                     for: result.composition,
                     intensity: self.filterIntensity
                 )
 
+                // EQ tap 掛載到 composition 音軌
+                var immediateMix: AVMutableAudioMix? = nil
+                let compAudioTracks = try await result.composition.loadTracks(withMediaType: .audio)
+                if let audioTrack = compAudioTracks.first {
+                    let tap = AudioEQTap.createTap(context: self.playback.eqTapContext)
+                    let mix = AVMutableAudioMix()
+                    let params = AVMutableAudioMixInputParameters(track: audioTrack)
+                    params.audioTapProcessor = tap
+                    // 沿用 volume ramp 設定
+                    if let originalMix = result.audioMix {
+                        for origParam in originalMix.inputParameters {
+                            // 合併 tap 到原始參數（但 AudioMixInputParameters 無法直接合併，
+                            // 所以只掛 tap，音量由 audioMix 中的 ramp 處理）
+                        }
+                    }
+                    mix.inputParameters = [params]
+                    immediateMix = mix
+                }
+                // 如果有 volume ramp，優先使用原始 audioMix（含音量調整）
+                let activeMix = result.audioMix ?? immediateMix
+
+                let wasPlaying = playback.isPlaying
+                let position = timeline.playheadPosition
+
                 playback.replacePlayerItem(
                     with: result.composition,
-                    audioMix: result.audioMix,
+                    audioMix: activeMix,
                     videoComposition: videoComp
                 )
-                // 替換 player item 後恢復播放頭位置
-                let position = timeline.playheadPosition
+
                 if position > 0 {
                     playback.seek(to: position)
                 }
+                if wasPlaying {
+                    playback.player.play()
+                    playback.isPlaying = true
+                }
+
+                // ── 第二步：背景匯出扁平檔，完成後靜默切換 ──
+                guard !Task.isCancelled else { return }
+
+                let flatURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("preview_\(UUID().uuidString).mov")
+
+                guard let session = AVAssetExportSession(
+                    asset: result.composition,
+                    presetName: AVAssetExportPreset960x540
+                ) else { return }
+                session.outputURL = flatURL
+                session.outputFileType = .mov
+                if let audioMix = result.audioMix {
+                    session.audioMix = audioMix
+                }
+
+                await session.export()
+
+                guard session.status == .completed else {
+                    debugLog("[Preview] 預覽匯出失敗: \(session.error?.localizedDescription ?? "未知")")
+                    return
+                }
+                guard !Task.isCancelled else {
+                    try? FileManager.default.removeItem(at: flatURL)
+                    return
+                }
+
+                // 清理上一次的暫存檔
+                if let oldURL = lastFlatPreviewURL {
+                    try? FileManager.default.removeItem(at: oldURL)
+                }
+                lastFlatPreviewURL = flatURL
+
+                // 用扁平檔靜默替換（記錄當前播放位置與狀態）
+                let flatAsset = AVURLAsset(url: flatURL)
+
+                let flatVideoComp = await selectedFilter.makeVideoComposition(
+                    for: flatAsset,
+                    intensity: self.filterIntensity
+                )
+
+                var flatAudioMix: AVMutableAudioMix? = nil
+                let flatAudioTracks = try await flatAsset.loadTracks(withMediaType: .audio)
+                if let audioTrack = flatAudioTracks.first {
+                    let tap = AudioEQTap.createTap(context: self.playback.eqTapContext)
+                    let mix = AVMutableAudioMix()
+                    let params = AVMutableAudioMixInputParameters(track: audioTrack)
+                    params.audioTapProcessor = tap
+                    mix.inputParameters = [params]
+                    flatAudioMix = mix
+                }
+
+                let currentPos = playback.currentTime
+                let stillPlaying = playback.isPlaying
+
+                playback.replacePlayerItem(
+                    with: flatAsset,
+                    audioMix: flatAudioMix,
+                    videoComposition: flatVideoComp
+                )
+
+                if currentPos > 0 {
+                    playback.seek(to: currentPos)
+                }
+                if stillPlaying {
+                    playback.player.play()
+                    playback.isPlaying = true
+                }
             } catch {
-                print("Composition 重建失敗：\(error.localizedDescription)")
+                debugLog("[Preview] Composition 重建失敗：\(error.localizedDescription)")
             }
         }
     }

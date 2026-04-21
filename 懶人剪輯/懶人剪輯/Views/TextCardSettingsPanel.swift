@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 
 struct TextCardSettingsPanel: View {
     @Bindable var vm: ProjectViewModel
@@ -92,6 +93,12 @@ struct TextCardSettingsPanel: View {
                     .font(.system(size: 12))
                     .frame(height: 50)
                     .border(Color(white: 0.3))
+                    .onReceive(NotificationCenter.default.publisher(for: NSTextView.didBeginEditingNotification)) { _ in
+                        vm.isEditingTextCard = true
+                    }
+                    .onReceive(NotificationCenter.default.publisher(for: NSTextView.didEndEditingNotification)) { _ in
+                        vm.isEditingTextCard = false
+                    }
                 }
 
                 // 時間設定
@@ -140,6 +147,50 @@ struct TextCardSettingsPanel: View {
                     Text(String(format: "%.1fx", card.scale))
                         .font(.caption.monospacedDigit())
                         .frame(width: 35)
+                }
+
+                // 圓角
+                HStack {
+                    Text("圓角")
+                    Slider(
+                        value: Binding(
+                            get: { card.effectiveCornerRadius },
+                            set: { vm.updateTextCardCornerRadius(id: selectedID, cornerRadius: $0) }
+                        ),
+                        in: 0...30,
+                        step: 1
+                    )
+                    Text(String(format: "%.0f", card.effectiveCornerRadius))
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 25)
+                }
+
+                // 淡入淡出
+                Toggle("淡入淡出", isOn: Binding(
+                    get: { card.fadeInOut },
+                    set: { vm.updateTextCardFadeInOut(id: selectedID, fadeInOut: $0) }
+                ))
+
+                // 音效
+                HStack {
+                    Text("音效")
+                    Picker("", selection: Binding(
+                        get: { card.soundEffect },
+                        set: { vm.updateTextCardSoundEffect(id: selectedID, soundEffect: $0) }
+                    )) {
+                        ForEach(TextCardSoundEffect.allCases) { effect in
+                            Text(effect.label).tag(effect)
+                        }
+                    }
+                    .frame(width: 90)
+
+                    Button {
+                        SoundEffectGenerator.shared.play(card.soundEffect)
+                    } label: {
+                        Image(systemName: "speaker.wave.2")
+                    }
+                    .disabled(card.soundEffect == .none)
+                    .buttonStyle(.plain)
                 }
 
                 // 刪除

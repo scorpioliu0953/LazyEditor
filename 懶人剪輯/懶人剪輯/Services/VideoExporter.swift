@@ -1,187 +1,11 @@
 import AVFoundation
+import CoreImage
 
 struct VideoExporter {
-    /// 使用 AVAssetReader + AVAssetWriter 匯出 composition 為 MP4
-    /// 影片軌：passthrough（不重編碼，保留原始品質）
-    /// 音軌：解碼為 PCM → 重編碼 AAC（正確處理 priming，避免同步漂移）
-    nonisolated static func export(
-        composition: AVMutableComposition,
-        to outputURL: URL,
-        audioMix: AVMutableAudioMix? = nil,
-        progressHandler: @Sendable @escaping (Float) -> Void
-    ) async throws {
-        let fm = FileManager.default
-        if fm.fileExists(atPath: outputURL.path) {
-            try fm.removeItem(at: outputURL)
-        }
 
-        // 載入軌道
-        let videoTracks = try await composition.loadTracks(withMediaType: .video)
-        let audioTracks = try await composition.loadTracks(withMediaType: .audio)
+    // MARK: - 音訊匯出
 
-        guard let sourceVideoTrack = videoTracks.first else {
-            throw ExportError.exportFailed(nil)
-        }
-
-        // 取得影片軌的實際長度作為統一基準
-        let videoTimeRange = try await sourceVideoTrack.load(.timeRange)
-        let totalDuration = videoTimeRange.duration
-
-        // ── Reader ──
-        let reader = try AVAssetReader(asset: composition)
-        reader.timeRange = CMTimeRange(start: .zero, duration: totalDuration)
-
-        // 影片：passthrough（outputSettings = nil）
-        let videoFormatDescs = try await sourceVideoTrack.load(.formatDescriptions)
-        let videoReaderOutput = AVAssetReaderTrackOutput(
-            track: sourceVideoTrack,
-            outputSettings: nil
-        )
-        videoReaderOutput.alwaysCopiesSampleData = false
-        reader.add(videoReaderOutput)
-
-        // 音訊：解碼為 PCM Float32
-        var audioReaderOutput: AVAssetReaderOutput?
-        var sourceSampleRate: Double = 48000
-        var sourceChannels: UInt32 = 2
-
-        if let sourceAudioTrack = audioTracks.first {
-            let audioFormatDescs = try await sourceAudioTrack.load(.formatDescriptions)
-            if let desc = audioFormatDescs.first,
-               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc as! CMAudioFormatDescription) {
-                sourceSampleRate = asbd.pointee.mSampleRate
-                sourceChannels = asbd.pointee.mChannelsPerFrame
-            }
-
-            let pcmSettings: [String: Any] = [
-                AVFormatIDKey: Int(kAudioFormatLinearPCM),
-                AVLinearPCMIsFloatKey: true,
-                AVLinearPCMBitDepthKey: 32,
-                AVLinearPCMIsNonInterleaved: false
-            ]
-
-            if let audioMix {
-                let mixOutput = AVAssetReaderAudioMixOutput(
-                    audioTracks: audioTracks,
-                    audioSettings: pcmSettings
-                )
-                mixOutput.audioMix = audioMix
-                reader.add(mixOutput)
-                audioReaderOutput = mixOutput
-            } else {
-                let trackOutput = AVAssetReaderTrackOutput(
-                    track: sourceAudioTrack,
-                    outputSettings: pcmSettings
-                )
-                trackOutput.alwaysCopiesSampleData = false
-                reader.add(trackOutput)
-                audioReaderOutput = trackOutput
-            }
-        }
-
-        // ── Writer ──
-        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
-
-        // 影片 Writer Input：passthrough
-        let videoFormatHint = videoFormatDescs.first as! CMFormatDescription?
-        let videoWriterInput = AVAssetWriterInput(
-            mediaType: .video,
-            outputSettings: nil,
-            sourceFormatHint: videoFormatHint
-        )
-        videoWriterInput.expectsMediaDataInRealTime = false
-
-        // 保留影片方向
-        let preferredTransform = try await sourceVideoTrack.load(.preferredTransform)
-        videoWriterInput.transform = preferredTransform
-
-        writer.add(videoWriterInput)
-
-        // 音訊 Writer Input：AAC 編碼
-        var audioWriterInput: AVAssetWriterInput?
-        if audioReaderOutput != nil {
-            let audioSettings: [String: Any] = [
-                AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-                AVSampleRateKey: sourceSampleRate,
-                AVNumberOfChannelsKey: sourceChannels,
-                AVEncoderBitRateKey: 256_000
-            ]
-            let input = AVAssetWriterInput(
-                mediaType: .audio,
-                outputSettings: audioSettings
-            )
-            input.expectsMediaDataInRealTime = false
-            writer.add(input)
-            audioWriterInput = input
-        }
-
-        // ── 開始讀寫 ──
-        guard reader.startReading() else {
-            throw ExportError.exportFailed(reader.error)
-        }
-        guard writer.startWriting() else {
-            throw ExportError.exportFailed(writer.error)
-        }
-        writer.startSession(atSourceTime: .zero)
-
-        let totalSeconds = totalDuration.seconds
-
-        // 使用純 GCD 迴圈，避免 requestMediaDataWhenReady 與 Swift concurrency 的死鎖
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            let group = DispatchGroup()
-
-            // 影片寫入
-            group.enter()
-            DispatchQueue.global(qos: .userInitiated).async {
-                var lastProgressTime = CACurrentMediaTime()
-                while let buffer = videoReaderOutput.copyNextSampleBuffer() {
-                    while !videoWriterInput.isReadyForMoreMediaData {
-                        Thread.sleep(forTimeInterval: 0.005)
-                    }
-                    videoWriterInput.append(buffer)
-                    let now = CACurrentMediaTime()
-                    if now - lastProgressTime > 0.1 {
-                        lastProgressTime = now
-                        let pts = CMSampleBufferGetPresentationTimeStamp(buffer)
-                        progressHandler(Float(min(pts.seconds / totalSeconds, 1.0)) * 0.9)
-                    }
-                }
-                videoWriterInput.markAsFinished()
-                group.leave()
-            }
-
-            // 音訊寫入
-            if let audioWriterInput, let audioReaderOutput {
-                group.enter()
-                DispatchQueue.global(qos: .userInitiated).async {
-                    while let buffer = audioReaderOutput.copyNextSampleBuffer() {
-                        while !audioWriterInput.isReadyForMoreMediaData {
-                            Thread.sleep(forTimeInterval: 0.005)
-                        }
-                        audioWriterInput.append(buffer)
-                    }
-                    audioWriterInput.markAsFinished()
-                    group.leave()
-                }
-            }
-
-            group.notify(queue: .global()) {
-                progressHandler(0.95)
-                writer.finishWriting {
-                    if writer.status == .failed {
-                        cont.resume(throwing: ExportError.exportFailed(writer.error))
-                    } else {
-                        cont.resume()
-                    }
-                }
-            }
-        }
-
-        progressHandler(1.0)
-        debugLog("[Export] Reader+Writer 匯出完成: \(outputURL.lastPathComponent) duration=\(totalSeconds)s")
-    }
-
-    /// 匯出音訊：使用 AVAssetReader + AVAssetWriter 直接從 composition 讀取 PCM 並寫入
+    /// 匯出音訊（M4A 使用 AVAssetExportSession；WAV/MP3 經由暫存 M4A 轉換）
     nonisolated static func exportAudio(
         composition: AVMutableComposition,
         audioMix: AVMutableAudioMix?,
@@ -195,25 +19,42 @@ struct VideoExporter {
 
         let ext = outputURL.pathExtension.lowercased()
 
-        if ext == "mp3" {
-            // MP3: 先輸出 WAV，再用 ffmpeg 轉 MP3
-            let tempWAV = fm.temporaryDirectory
-                .appendingPathComponent("temp_audio_\(UUID().uuidString).wav")
-            defer { try? fm.removeItem(at: tempWAV) }
-
-            try await writeAudioDirect(
-                composition: composition,
+        if ext == "m4a" {
+            try await exportAudioViaSession(
+                asset: composition,
                 audioMix: audioMix,
-                to: tempWAV,
-                fileType: .wav,
-                encoderSettings: nil
+                to: outputURL,
+                progressHandler: progressHandler
+            )
+        } else if ext == "wav" {
+            let tempM4A = fm.temporaryDirectory.appendingPathComponent("temp_\(UUID().uuidString).m4a")
+            defer { try? fm.removeItem(at: tempM4A) }
+
+            try await exportAudioViaSession(
+                asset: composition,
+                audioMix: audioMix,
+                to: tempM4A
+            ) { progress in
+                progressHandler(progress * 0.5)
+            }
+
+            try await convertToWAV(from: tempM4A, to: outputURL) { progress in
+                progressHandler(0.5 + progress * 0.5)
+            }
+        } else if ext == "mp3" {
+            let tempM4A = fm.temporaryDirectory.appendingPathComponent("temp_\(UUID().uuidString).m4a")
+            defer { try? fm.removeItem(at: tempM4A) }
+
+            try await exportAudioViaSession(
+                asset: composition,
+                audioMix: audioMix,
+                to: tempM4A
             ) { progress in
                 progressHandler(progress * 0.6)
             }
-
             progressHandler(0.6)
 
-            let args = ["-hide_banner", "-i", tempWAV.path,
+            let args = ["-hide_banner", "-i", tempM4A.path,
                         "-acodec", "libmp3lame", "-b:a", "192k", "-write_xing", "1",
                         "-y", outputURL.path]
             debugLog("[AudioExport] ffmpeg \(args.joined(separator: " "))")
@@ -239,136 +80,117 @@ struct VideoExporter {
                             userInfo: [NSLocalizedDescriptionKey: "MP3 轉換失敗"])
                 )
             }
-
             progressHandler(1.0)
-        } else if ext == "wav" {
-            try await writeAudioDirect(
-                composition: composition,
-                audioMix: audioMix,
-                to: outputURL,
-                fileType: .wav,
-                encoderSettings: nil
-            ) { progress in
-                progressHandler(progress)
-            }
         } else {
-            // M4A: 直接用 AVAssetWriter 編碼 AAC
-            try await writeAudioDirect(
-                composition: composition,
+            try await exportAudioViaSession(
+                asset: composition,
                 audioMix: audioMix,
                 to: outputURL,
-                fileType: .m4a,
-                encoderSettings: [
-                    AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-                    AVEncoderBitRateKey: 256_000
-                ]
-            ) { progress in
-                progressHandler(progress)
-            }
+                progressHandler: progressHandler
+            )
         }
     }
 
-    /// AVAssetReader → AVAssetWriter 直寫音頻（純 GCD，不用 requestMediaDataWhenReady）
-    private nonisolated static func writeAudioDirect(
-        composition: AVMutableComposition,
+    /// 用 AVAssetExportSession 匯出音訊
+    private nonisolated static func exportAudioViaSession(
+        asset: AVAsset,
         audioMix: AVMutableAudioMix?,
         to outputURL: URL,
-        fileType: AVFileType,
-        encoderSettings: [String: Any]?,
         progressHandler: @Sendable @escaping (Float) -> Void
     ) async throws {
-        let audioTracks = try await composition.loadTracks(withMediaType: .audio)
+        let fm = FileManager.default
+        if fm.fileExists(atPath: outputURL.path) {
+            try fm.removeItem(at: outputURL)
+        }
+
+        guard let session = AVAssetExportSession(
+            asset: asset,
+            presetName: AVAssetExportPresetAppleM4A
+        ) else {
+            throw ExportError.cannotCreateSession
+        }
+        session.outputURL = outputURL
+        session.outputFileType = .m4a
+        if let audioMix { session.audioMix = audioMix }
+
+        let progressTimer = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(200))
+                progressHandler(session.progress)
+            }
+        }
+
+        await session.export()
+        progressTimer.cancel()
+
+        guard session.status == .completed else {
+            throw ExportError.exportFailed(session.error)
+        }
+        progressHandler(1.0)
+        debugLog("[AudioExport] AVAssetExportSession 完成: \(outputURL.lastPathComponent)")
+    }
+
+    /// M4A → WAV 轉換
+    private nonisolated static func convertToWAV(
+        from inputURL: URL,
+        to outputURL: URL,
+        progressHandler: @Sendable @escaping (Float) -> Void
+    ) async throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: outputURL.path) {
+            try fm.removeItem(at: outputURL)
+        }
+
+        let asset = AVURLAsset(url: inputURL)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
         guard let audioTrack = audioTracks.first else {
             throw ExportError.exportFailed(nil)
         }
 
-        // 以影片軌長度為準
-        let videoTracks = try await composition.loadTracks(withMediaType: .video)
-        let targetDuration: CMTime
-        if let vt = videoTracks.first {
-            targetDuration = try await vt.load(.timeRange).duration
-        } else {
-            targetDuration = try await audioTrack.load(.timeRange).duration
-        }
-
-        // Reader: 解碼為 PCM（使用 AudioMixOutput 以支援音量調整）
-        let reader = try AVAssetReader(asset: composition)
-        reader.timeRange = CMTimeRange(start: .zero, duration: targetDuration)
-
-        let pcmSettings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatLinearPCM),
-            AVLinearPCMIsFloatKey: true,
-            AVLinearPCMBitDepthKey: 32,
-            AVLinearPCMIsNonInterleaved: false
-        ]
-
-        let readerOutput: AVAssetReaderOutput
-        if let audioMix {
-            let mixOutput = AVAssetReaderAudioMixOutput(
-                audioTracks: audioTracks,
-                audioSettings: pcmSettings
-            )
-            mixOutput.audioMix = audioMix
-            readerOutput = mixOutput
-        } else {
-            readerOutput = AVAssetReaderTrackOutput(
-                track: audioTrack,
-                outputSettings: pcmSettings
-            )
-        }
-        reader.add(readerOutput)
-
-        // Writer
-        let writer = try AVAssetWriter(outputURL: outputURL, fileType: fileType)
-
-        // 讀取來源音軌的取樣率與聲道數
-        let formatDescs = try await audioTrack.load(.formatDescriptions)
-        var sampleRate: Double = 48000
-        var channels: UInt32 = 2
-        if let desc = formatDescs.first {
-            let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc as! CMAudioFormatDescription)
-            if let asbd {
-                sampleRate = asbd.pointee.mSampleRate
-                channels = asbd.pointee.mChannelsPerFrame
-            }
-        }
-
-        let writerSettings: [String: Any]
-        if var encoderSettings {
-            encoderSettings[AVSampleRateKey] = sampleRate
-            encoderSettings[AVNumberOfChannelsKey] = channels
-            writerSettings = encoderSettings
-        } else {
-            // WAV: PCM 16-bit
-            writerSettings = [
+        let reader = try AVAssetReader(asset: asset)
+        let aro = AVAssetReaderTrackOutput(
+            track: audioTrack,
+            outputSettings: [
                 AVFormatIDKey: Int(kAudioFormatLinearPCM),
-                AVSampleRateKey: sampleRate,
-                AVNumberOfChannelsKey: channels,
-                AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false,
-                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsFloatKey: true,
+                AVLinearPCMBitDepthKey: 32,
                 AVLinearPCMIsNonInterleaved: false
             ]
+        )
+        reader.add(aro)
+
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .wav)
+
+        let fds = try await audioTrack.load(.formatDescriptions)
+        var sampleRate: Double = 48000
+        var channels: UInt32 = 2
+        if let fd = fds.first,
+           let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fd as! CMAudioFormatDescription) {
+            sampleRate = asbd.pointee.mSampleRate
+            channels = asbd.pointee.mChannelsPerFrame
         }
 
-        let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: writerSettings)
+        let writerInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: channels,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ])
         writer.add(writerInput)
 
-        guard reader.startReading() else {
-            throw ExportError.exportFailed(reader.error)
-        }
-        guard writer.startWriting() else {
-            throw ExportError.exportFailed(writer.error)
-        }
+        guard reader.startReading() else { throw ExportError.exportFailed(reader.error) }
+        guard writer.startWriting() else { throw ExportError.exportFailed(writer.error) }
         writer.startSession(atSourceTime: .zero)
 
-        let totalSeconds = targetDuration.seconds
+        let duration = try await asset.load(.duration).seconds
 
-        // 純 GCD 迴圈 + finishWriting callback，避免與 Swift concurrency 死鎖
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 var lastProgressTime = CACurrentMediaTime()
-                while let buffer = readerOutput.copyNextSampleBuffer() {
+                while let buffer = aro.copyNextSampleBuffer() {
                     while !writerInput.isReadyForMoreMediaData {
                         Thread.sleep(forTimeInterval: 0.005)
                     }
@@ -377,7 +199,7 @@ struct VideoExporter {
                     if now - lastProgressTime > 0.1 {
                         lastProgressTime = now
                         let pts = CMSampleBufferGetPresentationTimeStamp(buffer)
-                        progressHandler(Float(min(pts.seconds / totalSeconds, 1.0)))
+                        progressHandler(Float(min(pts.seconds / duration, 1.0)))
                     }
                 }
                 writerInput.markAsFinished()
@@ -390,42 +212,22 @@ struct VideoExporter {
                 }
             }
         }
-
         progressHandler(1.0)
-        debugLog("[AudioExport] 音訊直寫完成: \(outputURL.lastPathComponent) duration=\(targetDuration.seconds)s")
     }
 
-    /// 執行 ffmpeg 命令
-    private nonisolated static func runFFmpeg(args: [String]) async throws {
-        debugLog("[ffmpeg] \(args.joined(separator: " "))")
+    // MARK: - 帶濾鏡影片匯出
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/local/bin/ffmpeg")
-        process.arguments = args
-        let pipe = Pipe()
-        process.standardError = pipe
-        process.standardOutput = pipe
-        try process.run()
-
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            process.terminationHandler = { _ in cont.resume() }
-        }
-
-        if process.terminationStatus != 0 {
-            let errorData = pipe.fileHandleForReading.readDataToEndOfFile()
-            let errorMsg = String(data: errorData, encoding: .utf8) ?? ""
-            debugLog("[ffmpeg] 失敗: \(errorMsg)")
-            throw ExportError.exportFailed(
-                NSError(domain: "VideoExporter", code: Int(process.terminationStatus),
-                        userInfo: [NSLocalizedDescriptionKey: "ffmpeg 失敗"])
-            )
-        }
-    }
-
-    /// 帶濾鏡匯出（使用 AVAssetExportSession，需重編碼影片）
+    /// 帶濾鏡匯出（手動逐幀 CIFilter 渲染，繞過 AVAssetReaderVideoCompositionOutput 死鎖）：
+    /// 1. AVAssetExportSession 預渲染乾淨音訊 → 暫存 M4A
+    /// 2. AVAssetReaderTrackOutput 讀取原始幀 → 手動 CIFilter → AVAssetWriter 暫存 MP4
+    /// 3. ffmpeg -c copy 取影片軌 + 乾淨音訊 → 最終 MP4
     nonisolated static func exportWithFilter(
         composition: AVMutableComposition,
-        videoComposition: AVVideoComposition,
+        filter: VideoFilterPreset = .none,
+        filterIntensity: Float = 1.0,
+        primaryTrack: SubtitleRenderer.TrackSnapshot? = nil,
+        secondaryTrack: SubtitleRenderer.TrackSnapshot? = nil,
+        textCardTrack: TextCardRenderer.TrackSnapshot? = nil,
         audioMix: AVMutableAudioMix?,
         to outputURL: URL,
         progressHandler: @Sendable @escaping (Float) -> Void
@@ -435,41 +237,334 @@ struct VideoExporter {
             try fm.removeItem(at: outputURL)
         }
 
-        guard let session = AVAssetExportSession(
-            asset: composition,
-            presetName: AVAssetExportPresetHighestQuality
-        ) else {
-            throw ExportError.cannotCreateSession
+        let tempVideoURL = fm.temporaryDirectory.appendingPathComponent("export_video_\(UUID().uuidString).mp4")
+        let tempAudioURL = fm.temporaryDirectory.appendingPathComponent("export_audio_\(UUID().uuidString).m4a")
+
+        defer {
+            try? fm.removeItem(at: tempVideoURL)
+            try? fm.removeItem(at: tempAudioURL)
         }
 
-        session.outputURL = outputURL
-        session.outputFileType = .mp4
-        session.videoComposition = videoComposition
-        if let audioMix { session.audioMix = audioMix }
+        // ── Step 1: 預渲染乾淨音訊 ──
+        let hasAudio = !(try await composition.loadTracks(withMediaType: .audio)).isEmpty
 
-        // 進度輪詢
-        let progressTask = Task.detached {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(100))
-                progressHandler(session.progress)
+        if hasAudio {
+            guard let audioSession = AVAssetExportSession(
+                asset: composition,
+                presetName: AVAssetExportPresetAppleM4A
+            ) else {
+                throw ExportError.cannotCreateSession
+            }
+            audioSession.outputURL = tempAudioURL
+            audioSession.outputFileType = .m4a
+            if let audioMix { audioSession.audioMix = audioMix }
+
+            await audioSession.export()
+
+            guard audioSession.status == .completed else {
+                throw ExportError.exportFailed(audioSession.error)
+            }
+            debugLog("[Export] Step1: 音訊預渲染完成")
+        }
+
+        // ── Step 2: 純影片逐幀渲染（不含音訊，避免 interleaving 死鎖）──
+        let videoTracks = try await composition.loadTracks(withMediaType: .video)
+        guard let videoTrack = videoTracks.first else {
+            throw ExportError.exportFailed(nil)
+        }
+
+        let reader = try AVAssetReader(asset: composition)
+
+        // 只讀影片幀（不加音訊 output，徹底避免 interleaving 死鎖）
+        let vro = AVAssetReaderTrackOutput(
+            track: videoTrack,
+            outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)]
+        )
+        reader.add(vro)
+
+        // 計算渲染尺寸與旋轉
+        let naturalSize = try await videoTrack.load(.naturalSize)
+        let preferredTransform = try await videoTrack.load(.preferredTransform)
+        let isPortrait = preferredTransform.a == 0 && preferredTransform.d == 0
+        let renderSize = isPortrait
+            ? CGSize(width: naturalSize.height, height: naturalSize.width)
+            : naturalSize
+
+        let writer = try AVAssetWriter(outputURL: tempVideoURL, fileType: .mp4)
+        let bitrate = Int(renderSize.width * renderSize.height) * 10
+
+        let vwi = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: Int(renderSize.width),
+            AVVideoHeightKey: Int(renderSize.height),
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: bitrate,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
+            ]
+        ])
+        vwi.expectsMediaDataInRealTime = false
+
+        // 判斷是否需要逐幀處理
+        let hasFilter = filter != .none
+        let hasSubs = (primaryTrack?.isVisible == true && !(primaryTrack?.entries.isEmpty ?? true))
+            || (secondaryTrack?.isVisible == true && !(secondaryTrack?.entries.isEmpty ?? true))
+        let hasTextCards = !(textCardTrack?.entries.isEmpty ?? true)
+        let needsProcessing = hasFilter || hasSubs || hasTextCards || isPortrait
+
+        var adaptor: AVAssetWriterInputPixelBufferAdaptor? = nil
+        if needsProcessing {
+            adaptor = AVAssetWriterInputPixelBufferAdaptor(
+                assetWriterInput: vwi,
+                sourcePixelBufferAttributes: [
+                    kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
+                    kCVPixelBufferWidthKey as String: Int(renderSize.width),
+                    kCVPixelBufferHeightKey as String: Int(renderSize.height)
+                ]
+            )
+        }
+        writer.add(vwi)
+
+        guard reader.startReading() else { throw ExportError.exportFailed(reader.error) }
+        guard writer.startWriting() else { throw ExportError.exportFailed(writer.error) }
+        writer.startSession(atSourceTime: .zero)
+
+        let ciContext = needsProcessing
+            ? CIContext(options: [.useSoftwareRenderer: false, .cacheIntermediates: false])
+            : nil
+
+        // 覆層快取
+        var cachedOverlayKey = ""
+        var cachedOverlay: CIImage? = nil
+
+        let totalSeconds = try await composition.load(.duration).seconds
+        let writeQueue = DispatchQueue(label: "com.lazyeditor.videoWrite", qos: .userInitiated)
+
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            var frameCount = 0
+            var lastProgressTime = CACurrentMediaTime()
+            var didResume = false
+
+            // 純影片寫入（單一軌道，單一 queue，無 interleaving 風險）
+            vwi.requestMediaDataWhenReady(on: writeQueue) {
+                while vwi.isReadyForMoreMediaData {
+                    guard let sampleBuffer = vro.copyNextSampleBuffer() else {
+                        vwi.markAsFinished()
+                        guard !didResume else { return }
+                        didResume = true
+                        if reader.status == .failed {
+                            writer.cancelWriting()
+                            cont.resume(throwing: ExportError.exportFailed(reader.error))
+                            return
+                        }
+                        writer.finishWriting {
+                            if writer.status == .failed {
+                                cont.resume(throwing: ExportError.exportFailed(writer.error))
+                            } else {
+                                debugLog("[Export] Step2: 寫入完成, 共 \(frameCount) 幀")
+                                cont.resume()
+                            }
+                        }
+                        return
+                    }
+
+                    let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
+                    if needsProcessing,
+                       let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+                       let adaptor,
+                       let ciContext {
+                        autoreleasepool {
+                            var image = CIImage(cvPixelBuffer: pixelBuffer)
+
+                            // 套用旋轉（直向影片）
+                            if isPortrait {
+                                image = image.transformed(by: preferredTransform)
+                                let origin = image.extent.origin
+                                if origin.x != 0 || origin.y != 0 {
+                                    image = image.transformed(by: CGAffineTransform(
+                                        translationX: -origin.x, y: -origin.y
+                                    ))
+                                }
+                            }
+
+                            let targetExtent = CGRect(origin: .zero, size: renderSize)
+
+                            // 套用濾鏡
+                            if hasFilter {
+                                image = image.clampedToExtent()
+                                image = filter.applyWithIntensity(to: image, intensity: filterIntensity)
+                                image = image.cropped(to: targetExtent)
+                            }
+
+                            // 套用字幕 + 字卡覆層
+                            if hasSubs || hasTextCards {
+                                let time = pts.seconds
+                                let key = exportOverlayKey(
+                                    time: time,
+                                    primaryTrack: hasSubs ? primaryTrack : nil,
+                                    secondaryTrack: hasSubs ? secondaryTrack : nil,
+                                    textCardTrack: hasTextCards ? textCardTrack : nil
+                                )
+                                if !key.isEmpty {
+                                    let overlay: CIImage?
+                                    if key == cachedOverlayKey {
+                                        overlay = cachedOverlay
+                                    } else {
+                                        var result: CIImage? = nil
+                                        if hasSubs {
+                                            result = SubtitleRenderer.renderOverlay(
+                                                at: time, renderSize: renderSize,
+                                                primaryTrack: primaryTrack,
+                                                secondaryTrack: secondaryTrack
+                                            )
+                                        }
+                                        if hasTextCards {
+                                            if let tcOverlay = TextCardRenderer.renderOverlay(
+                                                at: time, renderSize: renderSize,
+                                                track: textCardTrack
+                                            ) {
+                                                result = result.map { tcOverlay.composited(over: $0) } ?? tcOverlay
+                                            }
+                                        }
+                                        cachedOverlay = result
+                                        cachedOverlayKey = key
+                                        overlay = result
+                                    }
+                                    if let overlay {
+                                        image = overlay.composited(over: image)
+                                    }
+                                }
+                            }
+
+                            // 渲染到輸出 pixel buffer
+                            guard let pool = adaptor.pixelBufferPool else { return }
+                            var outputPB: CVPixelBuffer?
+                            CVPixelBufferPoolCreatePixelBuffer(nil, pool, &outputPB)
+                            guard let outputPB else { return }
+
+                            ciContext.render(image, to: outputPB)
+                            adaptor.append(outputPB, withPresentationTime: pts)
+                        }
+                    } else {
+                        vwi.append(sampleBuffer)
+                    }
+
+                    frameCount += 1
+                    let now = CACurrentMediaTime()
+                    if now - lastProgressTime > 0.2 {
+                        lastProgressTime = now
+                        progressHandler(Float(min(pts.seconds / totalSeconds, 1.0)) * 0.9)
+                    }
+                }
             }
         }
 
-        await session.export()
-        progressTask.cancel()
+        debugLog("[Export] Step2: 影片渲染完成")
+        progressHandler(0.9)
 
-        switch session.status {
-        case .completed:
-            progressHandler(1.0)
-            debugLog("[Export] 濾鏡匯出完成: \(outputURL.lastPathComponent)")
-        case .failed:
-            throw ExportError.exportFailed(session.error)
-        case .cancelled:
-            throw ExportError.cancelled
-        default:
-            throw ExportError.exportFailed(session.error)
+        // ── Step 3: 原生 AVFoundation 合併影片 + 音訊 ──
+        if hasAudio {
+            let videoSize = (try? fm.attributesOfItem(atPath: tempVideoURL.path)[.size] as? Int64) ?? 0
+            let audioSize = (try? fm.attributesOfItem(atPath: tempAudioURL.path)[.size] as? Int64) ?? 0
+            debugLog("[Export] Step3: 暫存影片 \(videoSize) bytes, 暫存音訊 \(audioSize) bytes")
+
+            let videoAsset = AVURLAsset(url: tempVideoURL)
+            let audioAsset = AVURLAsset(url: tempAudioURL)
+
+            let muxComp = AVMutableComposition()
+
+            // 加入影片軌
+            if let srcVideoTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
+               let dstVideoTrack = muxComp.addMutableTrack(
+                   withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid
+               ) {
+                let videoDuration = try await videoAsset.load(.duration)
+                try dstVideoTrack.insertTimeRange(
+                    CMTimeRange(start: .zero, duration: videoDuration),
+                    of: srcVideoTrack, at: .zero
+                )
+            }
+
+            // 加入音訊軌
+            if let srcAudioTrack = try await audioAsset.loadTracks(withMediaType: .audio).first,
+               let dstAudioTrack = muxComp.addMutableTrack(
+                   withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid
+               ) {
+                let videoDuration = try await videoAsset.load(.duration)
+                let audioDuration = try await audioAsset.load(.duration)
+                let safeDuration = CMTimeMinimum(videoDuration, audioDuration)
+                try dstAudioTrack.insertTimeRange(
+                    CMTimeRange(start: .zero, duration: safeDuration),
+                    of: srcAudioTrack, at: .zero
+                )
+            }
+
+            // Passthrough 匯出（單檔 → 單檔，不會損壞音訊）
+            guard let muxSession = AVAssetExportSession(
+                asset: muxComp,
+                presetName: AVAssetExportPresetPassthrough
+            ) else {
+                throw ExportError.cannotCreateSession
+            }
+            muxSession.outputURL = outputURL
+            muxSession.outputFileType = .mp4
+
+            await muxSession.export()
+
+            guard muxSession.status == .completed else {
+                debugLog("[Export] Step3: Passthrough mux 失敗: \(muxSession.error?.localizedDescription ?? "未知")")
+                throw ExportError.exportFailed(muxSession.error)
+            }
+        } else {
+            try fm.moveItem(at: tempVideoURL, to: outputURL)
         }
+
+        progressHandler(1.0)
+        debugLog("[Export] 匯出完成: \(outputURL.lastPathComponent)")
     }
+
+    // MARK: - 覆層快取 key
+
+    private static func exportOverlayKey(
+        time: Double,
+        primaryTrack: SubtitleRenderer.TrackSnapshot?,
+        secondaryTrack: SubtitleRenderer.TrackSnapshot?,
+        textCardTrack: TextCardRenderer.TrackSnapshot?
+    ) -> String {
+        var parts: [String] = []
+
+        if let pt = primaryTrack, pt.isVisible {
+            if let idx = pt.entries.firstIndex(where: { time >= $0.startTime && time < $0.endTime }) {
+                parts.append("p\(idx)")
+            }
+        }
+
+        if let st = secondaryTrack, st.isVisible {
+            if let idx = st.entries.firstIndex(where: { time >= $0.startTime && time < $0.endTime }) {
+                parts.append("s\(idx)")
+            }
+        }
+
+        if let tc = textCardTrack {
+            let fadeDur = 0.3
+            for (i, card) in tc.entries.enumerated() {
+                guard time >= card.startTime && time < card.endTime else { continue }
+                if card.fadeInOut {
+                    let elapsed = time - card.startTime
+                    let remaining = card.endTime - time
+                    if elapsed < fadeDur || remaining < fadeDur {
+                        parts.append("t\(i)@\(Int(time * 30))")
+                        continue
+                    }
+                }
+                parts.append("t\(i)")
+            }
+        }
+
+        return parts.joined(separator: "|")
+    }
+
+    // MARK: - Errors
 
     enum ExportError: Error, LocalizedError {
         case cannotCreateSession

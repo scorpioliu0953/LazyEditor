@@ -28,6 +28,10 @@ struct TextCardRenderer {
             let positionY: CGFloat
             let scale: CGFloat
             let widthRatio: CGFloat
+            let heightRatio: CGFloat
+            let effectiveCornerRadius: CGFloat
+            let fadeInOut: Bool
+            let soundEffect: TextCardSoundEffect
         }
     }
 
@@ -54,23 +58,26 @@ struct TextCardRenderer {
                     positionX: entry.positionX,
                     positionY: entry.positionY,
                     scale: entry.scale,
-                    widthRatio: entry.widthRatio
+                    widthRatio: entry.widthRatio,
+                    heightRatio: entry.heightRatio,
+                    effectiveCornerRadius: entry.effectiveCornerRadius,
+                    fadeInOut: entry.fadeInOut,
+                    soundEffect: entry.soundEffect
                 )
             }
         )
     }
 
-    /// 在指定時間點將字卡繪製到 CIImage 上
-    static func render(
-        onto image: CIImage,
+    /// 渲染字卡覆層（不合成到影片上，用於匯出快取）
+    static func renderOverlay(
         at time: Double,
         renderSize: CGSize,
         track: TrackSnapshot?
-    ) -> CIImage {
-        guard let track, !track.entries.isEmpty else { return image }
+    ) -> CIImage? {
+        guard let track, !track.entries.isEmpty else { return nil }
 
         let activeCards = track.entries.filter { time >= $0.startTime && time < $0.endTime }
-        guard !activeCards.isEmpty else { return image }
+        guard !activeCards.isEmpty else { return nil }
 
         let width = Int(renderSize.width)
         let height = Int(renderSize.height)
@@ -84,7 +91,7 @@ struct TextCardRenderer {
             bytesPerRow: width * 4,
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return image }
+        ) else { return nil }
 
         ctx.translateBy(x: 0, y: CGFloat(height))
         ctx.scaleBy(x: 1, y: -1)
@@ -96,13 +103,25 @@ struct TextCardRenderer {
         let pixelScale = renderSize.height / 400.0
 
         for card in activeCards {
-            drawCard(card, canvasSize: renderSize, pixelScale: pixelScale, context: ctx)
+            drawCard(card, canvasSize: renderSize, pixelScale: pixelScale, context: ctx, time: time)
         }
 
         NSGraphicsContext.restoreGraphicsState()
 
-        guard let cgImage = ctx.makeImage() else { return image }
-        let overlay = CIImage(cgImage: cgImage)
+        guard let cgImage = ctx.makeImage() else { return nil }
+        return CIImage(cgImage: cgImage)
+    }
+
+    /// 在指定時間點將字卡繪製到 CIImage 上
+    static func render(
+        onto image: CIImage,
+        at time: Double,
+        renderSize: CGSize,
+        track: TrackSnapshot?
+    ) -> CIImage {
+        guard let overlay = renderOverlay(at: time, renderSize: renderSize, track: track) else {
+            return image
+        }
         return overlay.composited(over: image)
     }
 
@@ -112,24 +131,38 @@ struct TextCardRenderer {
         _ card: TrackSnapshot.CardSnapshot,
         canvasSize: CGSize,
         pixelScale: CGFloat,
-        context: CGContext
+        context: CGContext,
+        time: Double
     ) {
+        // 淡入淡出 opacity
+        if card.fadeInOut {
+            let fadeDuration = 0.3
+            let elapsed = time - card.startTime
+            let remaining = card.endTime - time
+            var opacity = 1.0
+            if elapsed < fadeDuration { opacity = min(opacity, elapsed / fadeDuration) }
+            if remaining < fadeDuration { opacity = min(opacity, remaining / fadeDuration) }
+            let alpha = CGFloat(max(0, min(1, opacity)))
+            context.saveGState()
+            context.setAlpha(alpha)
+        }
         let fontSize = canvasSize.height * card.fontSizeRatio * card.scale
         let scaledPadding = card.padding * card.scale * pixelScale
-        let scaledCornerRadius = card.cornerRadius * card.scale * pixelScale
-        let scaledStrokeWidth = card.strokeWidth * pixelScale
+        let scaledCornerRadius = card.effectiveCornerRadius * card.scale * pixelScale
+        let scaledStrokeWidth = card.strokeWidth * card.scale * pixelScale
         let scaledShadowRadius = card.shadowRadius * pixelScale
 
+        // 字型查找：先嘗試 PostScript 名稱（FontPicker 存的格式），再用 family name fallback
         let font: NSFont = {
+            if let f = NSFont(name: card.fontName, size: fontSize) {
+                return f
+            }
             let descriptor = NSFontDescriptor(fontAttributes: [
                 .family: card.fontName
             ]).addingAttributes([
                 .traits: [NSFontDescriptor.TraitKey.weight: card.fontWeight]
             ])
             if let f = NSFont(descriptor: descriptor, size: fontSize) {
-                return f
-            }
-            if let f = NSFont(name: card.fontName, size: fontSize) {
                 return f
             }
             return NSFont.systemFont(ofSize: fontSize, weight: card.fontWeight)
@@ -159,23 +192,30 @@ struct TextCardRenderer {
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         )
 
+        let drawHeight: CGFloat
+        if card.heightRatio > 0 {
+            drawHeight = canvasSize.height * card.heightRatio
+        } else {
+            drawHeight = boundingRect.height + 4
+        }
+
         // 字卡位置：以 positionX/Y 為中心
         let centerX = canvasSize.width * card.positionX
         let centerY = canvasSize.height * card.positionY
         let textX = centerX - maxWidth / 2
-        let textY = centerY - boundingRect.height / 2
+        let textY = centerY - drawHeight / 2
 
-        let drawRect = NSRect(x: textX, y: textY, width: maxWidth, height: boundingRect.height + 4)
+        let drawRect = NSRect(x: textX, y: textY, width: maxWidth, height: drawHeight)
 
         // 背景
         if card.backgroundColor.alphaComponent > 0.01 {
-            let textWidth = boundingRect.width
+            let textWidth = maxWidth
             let bgX = centerX - textWidth / 2 - scaledPadding
             let bgRect = NSRect(
                 x: bgX,
                 y: textY - scaledPadding,
                 width: textWidth + scaledPadding * 2,
-                height: boundingRect.height + scaledPadding * 2
+                height: drawHeight + scaledPadding * 2
             )
             context.saveGState()
             context.setFillColor(card.backgroundColor.cgColor)
@@ -190,14 +230,12 @@ struct TextCardRenderer {
             context.restoreGState()
         }
 
-        // 描邊
+        // 描邊（nsStrokePercent 負值描邊）
         if scaledStrokeWidth > 0 {
             let nsStrokePercent = (scaledStrokeWidth / fontSize) * 100.0 * 2.0
-
             context.saveGState()
             context.setLineJoin(.round)
             context.setLineCap(.round)
-
             let strokeAttrs: [NSAttributedString.Key: Any] = [
                 .font: font,
                 .foregroundColor: card.strokeColor,
@@ -207,12 +245,15 @@ struct TextCardRenderer {
             ]
             let strokeStr = NSAttributedString(string: card.text, attributes: strokeAttrs)
             strokeStr.draw(with: drawRect, options: [.usesLineFragmentOrigin, .usesFontLeading])
-
             context.restoreGState()
         }
 
         // 主文字
         attrStr.draw(with: drawRect, options: [.usesLineFragmentOrigin, .usesFontLeading])
+
+        if card.fadeInOut {
+            context.restoreGState()
+        }
     }
 
     // MARK: - Font Weight 轉換

@@ -1,6 +1,22 @@
 import CoreImage
 import AVFoundation
 
+/// 匯出時字幕/字卡覆層快取（避免每幀重新繪製）
+private final class ExportOverlayCache: @unchecked Sendable {
+    private var cachedOverlay: CIImage?
+    private var cachedKey: String = ""
+
+    func getOrRender(key: String, render: () -> CIImage?) -> CIImage? {
+        if key == cachedKey {
+            return cachedOverlay
+        }
+        let overlay = render()
+        cachedOverlay = overlay
+        cachedKey = key
+        return overlay
+    }
+}
+
 enum VideoFilterPreset: String, CaseIterable, Identifiable {
     case none
     case naturalSoft
@@ -297,6 +313,8 @@ enum VideoFilterPreset: String, CaseIterable, Identifiable {
 
         do {
             let renderSize = try await resolveRenderSize(for: asset)
+            let overlayCache = ExportOverlayCache()
+            let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
             let videoComposition = try await AVMutableVideoComposition.videoComposition(
                 with: asset,
@@ -310,30 +328,47 @@ enum VideoFilterPreset: String, CaseIterable, Identifiable {
 
                     output = output.cropped(to: request.sourceImage.extent)
 
-                    // 2) 燒錄字幕
-                    if hasSubs {
+                    // 2) 燒錄字幕 + 字卡（使用快取避免每幀重新繪製）
+                    if hasSubs || hasTextCards {
                         let time = request.compositionTime.seconds
-                        output = SubtitleRenderer.render(
-                            onto: output,
-                            at: time,
-                            renderSize: renderSize,
-                            primaryTrack: primaryTrack,
-                            secondaryTrack: secondaryTrack
+                        let key = overlayKey(
+                            time: time,
+                            primaryTrack: hasSubs ? primaryTrack : nil,
+                            secondaryTrack: hasSubs ? secondaryTrack : nil,
+                            textCardTrack: hasTextCards ? textCardTrack : nil
                         )
+
+                        if !key.isEmpty {
+                            if let overlay = overlayCache.getOrRender(key: key, render: {
+                                var result: CIImage? = nil
+
+                                if hasSubs {
+                                    result = SubtitleRenderer.renderOverlay(
+                                        at: time,
+                                        renderSize: renderSize,
+                                        primaryTrack: primaryTrack,
+                                        secondaryTrack: secondaryTrack
+                                    )
+                                }
+
+                                if hasTextCards {
+                                    if let tcOverlay = TextCardRenderer.renderOverlay(
+                                        at: time,
+                                        renderSize: renderSize,
+                                        track: textCardTrack
+                                    ) {
+                                        result = result.map { tcOverlay.composited(over: $0) } ?? tcOverlay
+                                    }
+                                }
+
+                                return result
+                            }) {
+                                output = overlay.composited(over: output)
+                            }
+                        }
                     }
 
-                    // 3) 燒錄字卡
-                    if hasTextCards {
-                        let time = request.compositionTime.seconds
-                        output = TextCardRenderer.render(
-                            onto: output,
-                            at: time,
-                            renderSize: renderSize,
-                            track: textCardTrack
-                        )
-                    }
-
-                    request.finish(with: output, context: nil)
+                    request.finish(with: output, context: ciContext)
                 }
             )
             videoComposition.renderSize = renderSize
@@ -346,6 +381,47 @@ enum VideoFilterPreset: String, CaseIterable, Identifiable {
     }
 
     // MARK: - 輔助
+
+    /// 計算覆層快取 key（相同 key 代表覆層不變，可重用）
+    private static func overlayKey(
+        time: Double,
+        primaryTrack: SubtitleRenderer.TrackSnapshot?,
+        secondaryTrack: SubtitleRenderer.TrackSnapshot?,
+        textCardTrack: TextCardRenderer.TrackSnapshot?
+    ) -> String {
+        var parts: [String] = []
+
+        if let pt = primaryTrack, pt.isVisible {
+            if let idx = pt.entries.firstIndex(where: { time >= $0.startTime && time < $0.endTime }) {
+                parts.append("p\(idx)")
+            }
+        }
+
+        if let st = secondaryTrack, st.isVisible {
+            if let idx = st.entries.firstIndex(where: { time >= $0.startTime && time < $0.endTime }) {
+                parts.append("s\(idx)")
+            }
+        }
+
+        if let tc = textCardTrack {
+            let fadeDur = 0.3
+            for (i, card) in tc.entries.enumerated() {
+                guard time >= card.startTime && time < card.endTime else { continue }
+                if card.fadeInOut {
+                    let elapsed = time - card.startTime
+                    let remaining = card.endTime - time
+                    if elapsed < fadeDur || remaining < fadeDur {
+                        // 淡入淡出期間每幀不同，不快取
+                        parts.append("t\(i)@\(Int(time * 30))")
+                        continue
+                    }
+                }
+                parts.append("t\(i)")
+            }
+        }
+
+        return parts.joined(separator: "|")
+    }
 
     private static func resolveRenderSize(for asset: AVAsset) async throws -> CGSize {
         let videoTracks = try await asset.loadTracks(withMediaType: .video)

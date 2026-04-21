@@ -86,6 +86,13 @@ struct StatusBarView: View {
                 Divider().frame(height: 12).opacity(0.3)
             }
 
+            // 播放器狀態（debug）
+            Text(vm.playback.playerStatusText)
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(playerStatusColor)
+
+            Divider().frame(height: 12).opacity(0.3)
+
             // 片段數量
             Text("\(vm.timeline.segments.count) 個片段")
                 .font(.system(size: 10))
@@ -93,13 +100,23 @@ struct StatusBarView: View {
 
             Divider().frame(height: 12).opacity(0.3)
 
-            Text("v2.4")
+            Text("v2.5")
                 .font(.system(size: 9))
                 .foregroundStyle(Color(white: 0.3))
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 3)
         .background(Color(white: 0.14))
+    }
+
+    private var playerStatusColor: Color {
+        switch vm.playback.playerStatusText {
+        case "playing": .green
+        case "paused", "ended": Color(white: 0.5)
+        case "buffering": .yellow
+        case "failed": .red
+        default: Color(white: 0.35)
+        }
     }
 
     private var allProxiesReady: Bool {

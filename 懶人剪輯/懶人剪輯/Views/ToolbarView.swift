@@ -134,12 +134,12 @@ struct ToolbarView: View {
                 vm.exportVideo()
             } label: {
                 HStack(spacing: 4) {
-                    Image(systemName: "square.and.arrow.up")
+                    Image(systemName: "film")
                         .font(.system(size: 12))
-                    Text("匯出")
+                    Text("匯出影片")
                         .font(.system(size: 12))
                 }
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(
                     vm.timeline.segments.isEmpty
@@ -151,9 +151,31 @@ struct ToolbarView: View {
             }
             .buttonStyle(.plain)
             .disabled(vm.timeline.segments.isEmpty || vm.exportVM.isExporting)
-            .help("匯出影片 + 音訊")
+            .help("匯出影片（MP4）")
 
-            // (匯出按鈕已包含自動分離音訊)
+            // 匯出純音訊
+            Button {
+                vm.exportAudioOnly()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 12))
+                    Text("匯出音訊")
+                        .font(.system(size: 12))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    vm.timeline.segments.isEmpty
+                        ? Color.orange.opacity(0.3)
+                        : Color.orange
+                )
+                .foregroundStyle(.white)
+                .cornerRadius(5)
+            }
+            .buttonStyle(.plain)
+            .disabled(vm.timeline.segments.isEmpty || vm.exportVM.isExporting)
+            .help("僅匯出音訊（M4A）")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)

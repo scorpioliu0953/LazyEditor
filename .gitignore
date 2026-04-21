@@ -36,3 +36,9 @@ Icon
 
 # Debug
 /tmp/lazyeditor_debug.log
+
+# Build artifacts
+DerivedData2/
+*.dmg
+*.mp4
+*.png

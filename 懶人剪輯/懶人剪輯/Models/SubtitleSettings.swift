@@ -14,6 +14,7 @@ final class SubtitleSettings {
     var backgroundColor: Color = .clear
     var backgroundPadding: CGFloat = 0
     var verticalPositionRatio: CGFloat = 0.88
+    var letterSpacing: CGFloat = 0
 
     func applyPreset(_ preset: SubtitleStylePreset) {
         fontName = preset.fontName

@@ -19,6 +19,7 @@ struct SubtitleRenderer {
         let backgroundColor: NSColor
         let backgroundPadding: CGFloat
         let verticalPositionRatio: CGFloat
+        let letterSpacing: CGFloat
         let isVisible: Bool
     }
 
@@ -37,31 +38,30 @@ struct SubtitleRenderer {
             backgroundColor: NSColor(track.settings.backgroundColor),
             backgroundPadding: track.settings.backgroundPadding,
             verticalPositionRatio: track.settings.verticalPositionRatio,
+            letterSpacing: track.settings.letterSpacing,
             isVisible: track.isVisible
         )
     }
 
-    /// 在指定時間點將字幕繪製到 CIImage 上
-    static func render(
-        onto image: CIImage,
+    /// 渲染字幕覆層（不合成到影片上，用於匯出快取）
+    static func renderOverlay(
         at time: Double,
         renderSize: CGSize,
         primaryTrack: TrackSnapshot?,
         secondaryTrack: TrackSnapshot?
-    ) -> CIImage {
+    ) -> CIImage? {
         let hasPrimary = primaryTrack?.isVisible == true && !(primaryTrack?.entries.isEmpty ?? true)
         let hasSecondary = secondaryTrack?.isVisible == true && !(secondaryTrack?.entries.isEmpty ?? true)
 
-        guard hasPrimary || hasSecondary else { return image }
+        guard hasPrimary || hasSecondary else { return nil }
 
         let primaryEntry = primaryTrack?.entries.first { time >= $0.startTime && time < $0.endTime }
         let secondaryEntry = secondaryTrack?.entries.first { time >= $0.startTime && time < $0.endTime }
 
-        guard primaryEntry != nil || secondaryEntry != nil else { return image }
+        guard primaryEntry != nil || secondaryEntry != nil else { return nil }
 
         let isBilingual = hasPrimary && hasSecondary
 
-        // 建立透明 CGContext 繪製字幕
         let width = Int(renderSize.width)
         let height = Int(renderSize.height)
         let colorSpace = CGColorSpaceCreateDeviceRGB()
@@ -74,9 +74,8 @@ struct SubtitleRenderer {
             bytesPerRow: width * 4,
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return image }
+        ) else { return nil }
 
-        // CGContext Y 軸向上，翻轉使 Y=0 在頂部
         ctx.translateBy(x: 0, y: CGFloat(height))
         ctx.scaleBy(x: 1, y: -1)
 
@@ -84,20 +83,17 @@ struct SubtitleRenderer {
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = nsCtx
 
-        // 繪製第一語言字幕
         if let track = primaryTrack, let entry = primaryEntry {
-            let yRatio = track.verticalPositionRatio
             drawSubtitleText(
                 text: entry.text,
                 track: track,
                 fontSize: renderSize.height * track.fontSizeRatio,
-                yRatio: yRatio,
+                yRatio: track.verticalPositionRatio,
                 canvasSize: renderSize,
                 context: ctx
             )
         }
 
-        // 繪製第二語言字幕
         if isBilingual, let track = secondaryTrack, let entry = secondaryEntry {
             drawSubtitleText(
                 text: entry.text,
@@ -111,12 +107,27 @@ struct SubtitleRenderer {
 
         NSGraphicsContext.restoreGraphicsState()
 
-        guard let cgImage = ctx.makeImage() else { return image }
+        guard let cgImage = ctx.makeImage() else { return nil }
+        return CIImage(cgImage: cgImage)
+    }
 
-        let subtitleOverlay = CIImage(cgImage: cgImage)
-
-        // 合成：字幕層疊在影片畫面上
-        return subtitleOverlay.composited(over: image)
+    /// 在指定時間點將字幕繪製到 CIImage 上
+    static func render(
+        onto image: CIImage,
+        at time: Double,
+        renderSize: CGSize,
+        primaryTrack: TrackSnapshot?,
+        secondaryTrack: TrackSnapshot?
+    ) -> CIImage {
+        guard let overlay = renderOverlay(
+            at: time,
+            renderSize: renderSize,
+            primaryTrack: primaryTrack,
+            secondaryTrack: secondaryTrack
+        ) else {
+            return image
+        }
+        return overlay.composited(over: image)
     }
 
     // MARK: - 文字繪製
@@ -129,18 +140,19 @@ struct SubtitleRenderer {
         canvasSize: CGSize,
         context: CGContext
     ) {
-        // 使用 NSFontDescriptor 以 family name + weight 建立字型（與 SwiftUI .custom() 行為一致）
+        // 字型查找：先嘗試 PostScript 名稱（FontPicker 存的格式），再用 family name fallback
         let font: NSFont = {
+            // 1) 嘗試直接以 PostScript 名稱建立（如 PingFangTC-Semibold）
+            if let f = NSFont(name: track.fontName, size: fontSize) {
+                return f
+            }
+            // 2) 以 family name + weight 建立（如 "PingFang TC"）
             let descriptor = NSFontDescriptor(fontAttributes: [
                 .family: track.fontName
             ]).addingAttributes([
                 .traits: [NSFontDescriptor.TraitKey.weight: track.fontWeight]
             ])
             if let f = NSFont(descriptor: descriptor, size: fontSize) {
-                return f
-            }
-            // 嘗試直接以 PostScript 名稱建立
-            if let f = NSFont(name: track.fontName, size: fontSize) {
                 return f
             }
             return NSFont.systemFont(ofSize: fontSize, weight: track.fontWeight)
@@ -163,6 +175,11 @@ struct SubtitleRenderer {
             .foregroundColor: track.textColor,
             .paragraphStyle: paragraphStyle
         ]
+
+        // 文字間距
+        if track.letterSpacing > 0 {
+            textAttrs[.kern] = track.letterSpacing * pixelScale
+        }
 
         // 陰影
         if track.shadowRadius > 0 {
@@ -208,27 +225,24 @@ struct SubtitleRenderer {
             context.restoreGState()
         }
 
-        // 描邊（使用負值 strokeWidth = 填充 + 描邊同時繪製，避免間隙）
+        // 描邊（nsStrokePercent 負值描邊）
         if scaledStrokeWidth > 0 {
-            // strokeWidth 為字體大小的百分比，負值 = 同時填充 + 描邊
             let nsStrokePercent = (scaledStrokeWidth / fontSize) * 100.0 * 2.0
-
-            // 設定圓角連接，避免尖角產生三角形突出
             context.saveGState()
             context.setLineJoin(.round)
             context.setLineCap(.round)
-
-            // 描邊層：用描邊色同時填充 + 描邊（作為底層）
-            let strokeAttrs: [NSAttributedString.Key: Any] = [
+            var strokeAttrs: [NSAttributedString.Key: Any] = [
                 .font: font,
                 .foregroundColor: track.strokeColor,
                 .strokeColor: track.strokeColor,
-                .strokeWidth: -nsStrokePercent, // 負值 = 填充 + 描邊
+                .strokeWidth: -nsStrokePercent,
                 .paragraphStyle: paragraphStyle
             ]
+            if track.letterSpacing > 0 {
+                strokeAttrs[.kern] = track.letterSpacing * pixelScale
+            }
             let strokeStr = NSAttributedString(string: text, attributes: strokeAttrs)
             strokeStr.draw(with: drawRect, options: [.usesLineFragmentOrigin, .usesFontLeading])
-
             context.restoreGState()
         }
 

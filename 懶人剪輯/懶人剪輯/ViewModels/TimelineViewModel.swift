@@ -5,6 +5,7 @@ import Observation
 final class TimelineViewModel {
     var zoomScale: CGFloat = Constants.defaultPixelsPerSecond
     var scrollOffset: CGFloat = 0
+    private(set) var cachedContentWidth: CGFloat = 0
 
     /// 剪刀工具懸停時的 X 座標（相對於時間軸內容區域），nil 表示未懸停
     var bladeHoverX: CGFloat?
@@ -36,6 +37,10 @@ final class TimelineViewModel {
     func totalContentWidth(segments: [ClipSegment]) -> CGFloat {
         let totalDuration = segments.reduce(0.0) { $0 + $1.duration }
         return CGFloat(totalDuration) * zoomScale + CGFloat(max(0, segments.count - 1)) * Constants.segmentSpacing
+    }
+
+    func updateContentWidth(segments: [ClipSegment]) {
+        cachedContentWidth = totalContentWidth(segments: segments)
     }
 
     func clampZoom() {

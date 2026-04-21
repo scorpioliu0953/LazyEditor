@@ -1,6 +1,6 @@
 import Foundation
 
-struct SubtitleEntry: Identifiable {
+struct SubtitleEntry: Identifiable, Equatable {
     let id: UUID
     var startTime: Double
     var endTime: Double

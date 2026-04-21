@@ -1,17 +1,22 @@
 import AVFoundation
 import MediaToolbox
 
+/// 非同步寫入 debug log，避免阻塞呼叫執行緒
 func debugLog(_ msg: String) {
-    let path = "/tmp/lazyeditor_debug.log"
     let line = "\(Date()): \(msg)\n"
-    if let handle = FileHandle(forWritingAtPath: path) {
-        handle.seekToEndOfFile()
-        handle.write(line.data(using: .utf8)!)
-        handle.closeFile()
-    } else {
-        FileManager.default.createFile(atPath: path, contents: line.data(using: .utf8))
+    debugLogQueue.async {
+        let path = "/tmp/lazyeditor_debug.log"
+        if let handle = FileHandle(forWritingAtPath: path) {
+            handle.seekToEndOfFile()
+            handle.write(line.data(using: .utf8)!)
+            handle.closeFile()
+        } else {
+            FileManager.default.createFile(atPath: path, contents: line.data(using: .utf8))
+        }
     }
 }
+
+private let debugLogQueue = DispatchQueue(label: "com.lazyeditor.debuglog", qos: .utility)
 
 struct VideoCompositionBuilder {
     struct CompositionResult {
@@ -49,7 +54,6 @@ struct VideoCompositionBuilder {
         )
 
         var insertionTime: CMTime = .zero
-        var hasVolumeChanges = false
         var volumeRamps: [(time: CMTime, duration: CMTime, volume: Float)] = []
 
         for segment in segments {
@@ -99,7 +103,6 @@ struct VideoCompositionBuilder {
             }
 
             // 音量
-            if segment.volumeDB != 0 { hasVolumeChanges = true }
             volumeRamps.append((
                 time: insertionTime,
                 duration: timeRange.duration,
@@ -149,7 +152,7 @@ struct VideoCompositionBuilder {
             audioMix = mix
         }
 
-        // 診斷：記錄影片/音軌實際長度，確認同步
+        // 診斷
         let finalVideoRange = videoTrack.timeRange
         let finalAudioRange = audioTrack?.timeRange ?? .zero
         debugLog("[Composition] 影片軌: \(finalVideoRange.duration.seconds)s, 音軌: \(finalAudioRange.duration.seconds)s, 差異: \((finalVideoRange.duration.seconds - finalAudioRange.duration.seconds) * 1000)ms, 段落數: \(segments.count)")
