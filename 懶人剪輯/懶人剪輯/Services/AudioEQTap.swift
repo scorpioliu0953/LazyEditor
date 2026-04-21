@@ -125,6 +125,8 @@ struct AudioEQTap {
             process: tapProcess
         )
 
+        #if compiler(>=6.2)
+        // Swift 6.2+ (Xcode 16.4+): MTAudioProcessingTapCreate 回復為 MTAudioProcessingTap?
         var tap: MTAudioProcessingTap?
         let status = MTAudioProcessingTapCreate(
             kCFAllocatorDefault,
@@ -132,15 +134,30 @@ struct AudioEQTap {
             kMTAudioProcessingTapCreationFlag_PostEffects,
             &tap
         )
-
         if status == noErr {
             debugLog("[EQTap] 建立成功: tap=\(tap != nil)")
         } else {
             debugLog("[EQTap] 建立失敗: status=\(status)")
         }
-
         guard status == noErr else { return nil }
         return tap
+        #else
+        // Swift 6.1 (Xcode 16.3): MTAudioProcessingTapCreate 使用 Unmanaged
+        var unmanagedTap: Unmanaged<MTAudioProcessingTap>?
+        let status = MTAudioProcessingTapCreate(
+            kCFAllocatorDefault,
+            &callbacks,
+            kMTAudioProcessingTapCreationFlag_PostEffects,
+            &unmanagedTap
+        )
+        if status == noErr {
+            debugLog("[EQTap] 建立成功: tap=\(unmanagedTap != nil)")
+        } else {
+            debugLog("[EQTap] 建立失敗: status=\(status)")
+        }
+        guard status == noErr, let unmanagedTap else { return nil }
+        return unmanagedTap.takeRetainedValue()
+        #endif
     }
 }
 
